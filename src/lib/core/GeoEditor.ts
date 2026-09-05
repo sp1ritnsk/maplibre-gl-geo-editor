@@ -75,6 +75,16 @@ import {
   AngledRectangleFeature,
 } from "../features";
 import { getPolygonFeatures } from "../utils/selectionUtils";
+import { principalDirection, snapRotation } from "../utils/rotationSnapping";
+
+/**
+ * How far off parallel, in degrees, still snaps onto a neighbouring edge.
+ * Wide enough to catch by hand, narrow enough that a deliberate angle in
+ * between survives.
+ */
+const ROTATE_SNAP_TOLERANCE_DEGREES = 4;
+/** Half-length of the hint drawn along the direction that was matched. */
+const ROTATE_GUIDE_METRES = 40;
 import { isPolygon, isLine } from "../utils/geometryUtils";
 
 /**
@@ -138,6 +148,16 @@ export class GeoEditor implements IControl {
   private boundScaleMouseUp: ((e: MapMouseEvent) => void) | null = null;
   // Open the numerical-rotation popup on double-click / right-click in rotate mode.
   private boundRotateDblClick: ((e: MapMouseEvent) => void) | null = null;
+  private boundRotateDragDown: ((e: MapMouseEvent) => void) | null = null;
+  private boundRotateDragMove: ((e: MapMouseEvent) => void) | null = null;
+  private boundRotateDragUp: (() => void) | null = null;
+  private isRotatingByDrag = false;
+  private rotateDragStart: Feature | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private rotateDragData: any = null;
+  private rotateDragPivot: Position | null = null;
+  private rotateDragBearing = 0;
+  private rotateDragOwn = 0;
   private boundRotateContextMenu: ((e: MapMouseEvent) => void) | null = null;
 
   // Selection mode state
@@ -294,6 +314,7 @@ export class GeoEditor implements IControl {
     this.setupSelectionHandler();
     this.setupScaleHandler();
     this.setupRotateHandler();
+    this.setupRotateDragHandler();
     this.setupMultiDragHandler();
     this.setupDrawFinishHandlers();
 
@@ -324,6 +345,7 @@ export class GeoEditor implements IControl {
     this.removeSelectionHandler();
     this.removeScaleHandler();
     this.removeRotateHandler();
+    this.removeRotateDragHandler();
     this.removeMultiDragHandler();
     this.removeDrawFinishHandlers();
     this.removeVertexMarkerStyleListener();
@@ -1196,6 +1218,157 @@ export class GeoEditor implements IControl {
     this.scaleDragPanEnabled = null;
   }
 
+  // ==========================================================================
+  // Rotate by dragging, snapped to the plan
+  // ==========================================================================
+
+  /**
+   * Bearing from a pivot to a point, in degrees clockwise from north.
+   *
+   * The full turn is kept here, unlike the folded directions used for
+   * snapping: the hand may swing the object right past 180°.
+   */
+  private bearingFrom(pivot: Position, point: Position): number {
+    const scale = Math.cos((pivot[1] * Math.PI) / 180);
+    const east = (point[0] - pivot[0]) * scale;
+    const north = point[1] - pivot[1];
+    return (Math.atan2(east, north) * 180) / Math.PI;
+  }
+
+  /** Outer ring of a polygon, or the line itself. */
+  private ringOfFeature(feature: Feature): Position[] | null {
+    const geometry = feature.geometry;
+    if (geometry.type === "Polygon") return geometry.coordinates[0] ?? null;
+    if (geometry.type === "LineString") return geometry.coordinates;
+    return null;
+  }
+
+  /** A line through the pivot along a direction, drawn as the snapping hint. */
+  private guideAlong(pivot: Position, direction: number, metres: number): Position[] {
+    const radians = (direction * Math.PI) / 180;
+    const east = (Math.sin(radians) * metres) / (111320 * Math.cos((pivot[1] * Math.PI) / 180));
+    const north = (Math.cos(radians) * metres) / 110540;
+    return [
+      [pivot[0] - east, pivot[1] - north],
+      [pivot[0] + east, pivot[1] + north],
+    ];
+  }
+
+  private setupRotateDragHandler(): void {
+    this.boundRotateDragDown = (e: MapMouseEvent) => {
+      if (this.state.activeEditMode !== "rotate") return;
+      const found =
+        this.state.selectedFeatures[0] ??
+        (() => {
+          const result =
+            this.findFeatureByMouseEvent(e) ??
+            this.findFeatureAtPoint(e.lngLat.lng, e.lngLat.lat);
+          if (!result) return null;
+          this.selectFeatures([result.feature], [result.geomanData]);
+          return this.state.selectedFeatures[0] ?? null;
+        })();
+      if (!found) return;
+      const feature = found.feature;
+      const ring = this.ringOfFeature(feature);
+      if (!ring) return;
+
+      e.preventDefault();
+      this.rotateDragStart = feature;
+      this.rotateDragData = found.geomanData;
+      this.rotateDragPivot = turf.centroid(feature).geometry
+        .coordinates as Position;
+      this.rotateDragBearing = this.bearingFrom(this.rotateDragPivot, [
+        e.lngLat.lng,
+        e.lngLat.lat,
+      ]);
+      this.rotateDragOwn = principalDirection(ring) ?? 0;
+      this.isRotatingByDrag = true;
+      this.disableScaleDragPan();
+    };
+
+    this.boundRotateDragMove = (e: MapMouseEvent) => {
+      if (!this.isRotatingByDrag || !this.rotateDragStart) return;
+      const pivot = this.rotateDragPivot as Position;
+      const raw =
+        this.bearingFrom(pivot, [e.lngLat.lng, e.lngLat.lat]) -
+        this.rotateDragBearing;
+      // Snapping targets come from the plan itself; the object's own edges are
+      // left out, or it would happily snap to the direction it already has.
+      const targets = this.guidesEnabled
+        ? this.alignmentGuides.edgeDirections(
+            this.getGeomanIdFromFeature(this.rotateDragStart) ?? undefined,
+          )
+        : [];
+      const snapped = snapRotation(
+        this.rotateDragOwn,
+        raw,
+        targets,
+        ROTATE_SNAP_TOLERANCE_DEGREES,
+      );
+      const rotated = this.rotateFeature.rotate(
+        this.rotateDragStart,
+        snapped.angle,
+        pivot,
+      );
+      this.applyRotatedFeature(rotated);
+      this.alignmentGuides.showLines(
+        snapped.target === null
+          ? []
+          : [this.guideAlong(pivot, snapped.target, ROTATE_GUIDE_METRES)],
+      );
+      this.emitEvent("gm:rotate", { feature: rotated, angle: snapped.angle });
+    };
+
+    this.boundRotateDragUp = () => {
+      if (!this.isRotatingByDrag) return;
+      this.isRotatingByDrag = false;
+      this.restoreScaleDragPan();
+      this.alignmentGuides.showLines([]);
+      const original = this.rotateDragStart;
+      const rotated = this.state.selectedFeatures[0]?.feature;
+      this.rotateDragStart = null;
+      this.rotateDragData = null;
+      if (!original || !rotated || rotated === original) return;
+      this.recordEditOperation(original, rotated);
+      this.options.onFeatureEdit?.(rotated, original);
+      this.lastEditedFeature = rotated;
+      this.logSelectedFeatureCollection("edited", rotated);
+    };
+
+    this.map.on("mousedown", this.boundRotateDragDown);
+    this.map.on("mousemove", this.boundRotateDragMove);
+    this.map.on("mouseup", this.boundRotateDragUp);
+  }
+
+  private removeRotateDragHandler(): void {
+    if (this.boundRotateDragDown) {
+      this.map.off("mousedown", this.boundRotateDragDown);
+      this.boundRotateDragDown = null;
+    }
+    if (this.boundRotateDragMove) {
+      this.map.off("mousemove", this.boundRotateDragMove);
+      this.boundRotateDragMove = null;
+    }
+    if (this.boundRotateDragUp) {
+      this.map.off("mouseup", this.boundRotateDragUp);
+      this.boundRotateDragUp = null;
+    }
+  }
+
+  /** Same live update as scaling, against the feature being rotated. */
+  private applyRotatedFeature(feature: Feature): void {
+    if (this.rotateDragData?.updateGeometry) {
+      this.rotateDragData.updateGeometry(feature.geometry);
+    } else if (this.rotateDragData?.updateGeoJsonGeometry) {
+      this.rotateDragData.updateGeoJsonGeometry(feature.geometry);
+    }
+    const current = this.state.selectedFeatures[0];
+    if (current) {
+      this.state.selectedFeatures[0] = { ...current, feature };
+    }
+    this.updateSelectionHighlight();
+  }
+
   private applyScaledFeature(feature: Feature): void {
     if (this.scaleTargetGeomanData?.updateGeometry) {
       this.scaleTargetGeomanData.updateGeometry(feature.geometry);
@@ -1557,7 +1730,9 @@ export class GeoEditor implements IControl {
           this.geoman.enableGlobalEditMode();
           break;
         case "rotate":
-          this.geoman.enableGlobalRotateMode();
+          // Handled by setupRotateDragHandler: geoman's own rotate mode offers
+          // no point at which the live angle could be pulled onto a wall.
+          break;
           break;
         case "cut":
           this.geoman.enableGlobalCutMode();
@@ -4069,6 +4244,13 @@ export class GeoEditor implements IControl {
    * snapping: a guide shows where the cursor would land, and without snapping
    * it lands elsewhere.
    */
+  /**
+   * Geometry to align to that the editor does not hold — see the guides helper.
+   */
+  setReferenceGeometry(features: Feature[]): void {
+    this.alignmentGuides.setReferenceGeometry(features);
+  }
+
   setGuides(enabled: boolean): void {
     this.guidesEnabled = enabled;
     if (enabled && !this.snappingEnabled) {

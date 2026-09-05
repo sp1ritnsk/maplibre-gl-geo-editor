@@ -1,4 +1,4 @@
-import type { Position } from "geojson";
+import type { Feature, Position } from "geojson";
 import type { GeoJSONSource, Map as MapLibreMap, MapMouseEvent } from "maplibre-gl";
 
 import {
@@ -11,6 +11,7 @@ import {
   type Segment,
 } from "../utils/guideGeometry";
 import { frameAt, type Frame, type Ground, toGround, toPosition } from "../utils/groundPlane";
+import { directionOf } from "../utils/rotationSnapping";
 
 export interface AlignmentGuidesOptions {
   /** How close in pixels counts as aligned. Default: 8 */
@@ -48,6 +49,7 @@ export class AlignmentGuides {
   private readonly sectionKey: string;
   private readonly color: string;
   private handleMouseMove: ((e: MapMouseEvent) => void) | null = null;
+  private referenceEdges: Array<[Position, Position]> = [];
 
   constructor(options: AlignmentGuidesOptions = {}) {
     this.tolerance = options.tolerance ?? 8;
@@ -207,7 +209,52 @@ export class AlignmentGuides {
   }
 
   /** Рёбра уже нарисованных объектов — то, что продолжают направляющие. */
-  private edges(): Array<[Position, Position]> {
+  /**
+   * Directions of every edge on the plan, in degrees folded into [0, 180).
+   *
+   * Walls and the hall outline are ordinary features in the editor's store, so
+   * they come along with the rest — which is the point: a cabinet is usually
+   * placed parallel to a wall, not to another cabinet.
+   */
+  edgeDirections(excludeId?: string): number[] {
+    return this.edges(excludeId).map(([from, to]) => directionOf(from, to));
+  }
+
+  /**
+   * Geometry to align to that the editor itself does not hold.
+   *
+   * A host may keep part of the plan outside the editor — the hall outline is
+   * drawn but not edited most of the time — and still want shelves to line up
+   * with it. Those edges are handed over here instead of being made editable
+   * just so that they can be snapped to.
+   */
+  setReferenceGeometry(features: Feature[]): void {
+    const list: Array<[Position, Position]> = [];
+    for (const feature of features) {
+      const geometry = feature?.geometry;
+      if (!geometry) continue;
+      const rings =
+        geometry.type === "Polygon"
+          ? geometry.coordinates
+          : geometry.type === "LineString"
+            ? [geometry.coordinates]
+            : [];
+      for (const ring of rings) {
+        for (let index = 0; index < ring.length - 1; index += 1) {
+          list.push([ring[index], ring[index + 1]]);
+        }
+      }
+    }
+    this.referenceEdges = list;
+  }
+
+  /** Draw guide lines chosen by someone else — the rotation snapping does. */
+  showLines(lines: Position[][]): void {
+    this.ensureLayer();
+    this.draw(lines);
+  }
+
+  private edges(excludeId?: string): Array<[Position, Position]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const features = this.geoman?.features;
     if (!features || typeof features.getAll !== "function") return [];
@@ -222,13 +269,14 @@ export class AlignmentGuides {
     for (const feature of collection?.features ?? []) {
       const geometry = feature?.geometry;
       if (!geometry) continue;
+      if (excludeId !== undefined && String(feature.id) === excludeId) continue;
       if (geometry.type === "Polygon") {
         for (const ring of geometry.coordinates) addRing(ring, true);
       } else if (geometry.type === "LineString") {
         addRing(geometry.coordinates, false);
       }
     }
-    return list;
+    return [...list, ...this.referenceEdges];
   }
 
   private ensureLayer(): void {
