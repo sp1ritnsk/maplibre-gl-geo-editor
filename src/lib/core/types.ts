@@ -50,7 +50,7 @@ export type EditMode =
   | "simplify"
   | "lasso";
 
-export type HelperMode = "snapping" | "topology" | "measurements";
+export type HelperMode = "snapping" | "guides" | "angles" | "topology" | "measurements";
 
 export type FileMode = "open" | "save";
 

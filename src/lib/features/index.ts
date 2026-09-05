@@ -7,3 +7,4 @@ export { RotateFeature } from "./RotateFeature";
 export { LassoFeature } from "./LassoFeature";
 export { SplitFeature } from "./SplitFeature";
 export { FreehandFeature } from "./FreehandFeature";
+export { AngleSnapping } from "./AngleSnapping";

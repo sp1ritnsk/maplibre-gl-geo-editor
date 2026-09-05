@@ -57,6 +57,8 @@ export const ADVANCED_EDIT_MODES: EditMode[] = [
  */
 export const DEFAULT_HELPER_MODES: HelperMode[] = [
   "snapping",
+  "guides",
+  "angles",
   "topology",
   "measurements",
 ];

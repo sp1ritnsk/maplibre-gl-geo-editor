@@ -69,6 +69,7 @@ import {
   LassoFeature,
   SplitFeature,
   FreehandFeature,
+  AngleSnapping,
 } from "../features";
 import { getPolygonFeatures } from "../utils/selectionUtils";
 import { isPolygon, isLine } from "../utils/geometryUtils";
@@ -94,6 +95,7 @@ export class GeoEditor implements IControl {
   private lassoFeature: LassoFeature;
   private splitFeature: SplitFeature;
   private freehandFeature: FreehandFeature;
+  private angleSnapping: AngleSnapping;
 
   // Event listeners
   private boundKeyHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -117,6 +119,8 @@ export class GeoEditor implements IControl {
 
   // Snapping state (independent of other modes)
   private snappingEnabled: boolean = false;
+  private guidesEnabled: boolean = false;
+  private anglesEnabled: boolean = false;
   // Topology state (boundary reuse + shared-node editing)
   private topologyEnabled: boolean = false;
   // Prevent geometry updates made by topology handling from being reprocessed.
@@ -213,6 +217,7 @@ export class GeoEditor implements IControl {
     this.lassoFeature = new LassoFeature();
     this.splitFeature = new SplitFeature();
     this.freehandFeature = new FreehandFeature();
+    this.angleSnapping = new AngleSnapping();
 
     // Initialize history manager if enabled
     if (this.options.enableHistory !== false) {
@@ -237,6 +242,7 @@ export class GeoEditor implements IControl {
     this.lassoFeature.init(map);
     this.splitFeature.init(map);
     this.freehandFeature.init(map);
+    this.angleSnapping.init(map, this.geoman);
 
     // Create container
     this.container = document.createElement("div");
@@ -301,6 +307,7 @@ export class GeoEditor implements IControl {
     this.lassoFeature.destroy();
     this.splitFeature.destroy();
     this.freehandFeature.destroy();
+    this.angleSnapping.destroy();
 
     // Cleanup file input
     if (this.fileInput && this.fileInput.parentNode) {
@@ -322,6 +329,7 @@ export class GeoEditor implements IControl {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setGeoman(geoman: any): void {
     this.geoman = geoman;
+    this.angleSnapping.setGeoman(geoman);
     this.setupGeomanEvents();
     this.applySnappingState();
 
@@ -3516,6 +3524,45 @@ export class GeoEditor implements IControl {
 
     buttons.appendChild(snappingBtn);
 
+    if (this.options.helperModes.includes("guides")) {
+      // Направляющие Geoman: линии продолжения рёбер и осей соседних объектов.
+      const guidesBtn = document.createElement("button");
+      guidesBtn.className = `${CSS_PREFIX}-tool-button`;
+      guidesBtn.dataset.helper = "guides";
+      guidesBtn.title = "Toggle Alignment Guides";
+      guidesBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 2v20h1.5V2H4zm14.5 0v20H20V2h-1.5zM2 11.25h20v1.5H2v-1.5z" fill="currentColor"/></svg>';
+      guidesBtn.classList.toggle(
+        `${CSS_PREFIX}-tool-button--active`,
+        this.guidesEnabled,
+      );
+      guidesBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.setGuides(!this.guidesEnabled);
+      });
+      buttons.appendChild(guidesBtn);
+    }
+
+    if (this.options.helperModes.includes("angles")) {
+      // Угловая привязка: направление нового отрезка кратно шагу, отсчёт от
+      // предыдущей стороны контура, а не от осей экрана.
+      const anglesBtn = document.createElement("button");
+      anglesBtn.className = `${CSS_PREFIX}-tool-button`;
+      anglesBtn.dataset.helper = "angles";
+      anglesBtn.title = "Toggle Angle Snapping (45\u00B0 steps)";
+      anglesBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 20h16v1.5H4V20zm.75-.75L19 5v2.1L6.85 19.25H4.75zM9 16.5a5.5 5.5 0 0 0-3.5-5.2v1.65A3.9 3.9 0 0 1 7.4 16.5H9z" fill="currentColor"/></svg>';
+      anglesBtn.classList.toggle(
+        `${CSS_PREFIX}-tool-button--active`,
+        this.anglesEnabled,
+      );
+      anglesBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.setAngleSnapping(!this.anglesEnabled);
+      });
+      buttons.appendChild(anglesBtn);
+    }
+
     if (this.options.helperModes.includes("topology")) {
       const topologyBtn = document.createElement("button");
       topologyBtn.className = `${CSS_PREFIX}-tool-button`;
@@ -3908,6 +3955,78 @@ export class GeoEditor implements IControl {
         `${CSS_PREFIX}-tool-button--active`,
         this.snappingEnabled,
       );
+  }
+
+  isAngleSnappingEnabled(): boolean {
+    return this.anglesEnabled;
+  }
+
+  toggleAngleSnapping(): void {
+    this.setAngleSnapping(!this.anglesEnabled);
+  }
+
+  /**
+   * Angle snapping while drawing.
+   *
+   * Needs geoman's own snapping to be on: the helper publishes the
+   * angle-locked position as a snapping candidate and geoman is what pulls the
+   * cursor onto it.
+   */
+  setAngleSnapping(enabled: boolean): void {
+    this.anglesEnabled = enabled;
+    if (enabled && !this.snappingEnabled) {
+      this.setSnapping(true);
+    }
+    if (enabled) {
+      this.angleSnapping.enable();
+    } else {
+      this.angleSnapping.disable();
+    }
+    this.container
+      ?.querySelector<HTMLElement>('[data-helper="angles"]')
+      ?.classList.toggle(`${CSS_PREFIX}-tool-button--active`, this.anglesEnabled);
+  }
+
+  isGuidesEnabled(): boolean {
+    return this.guidesEnabled;
+  }
+
+  toggleGuides(): void {
+    this.setGuides(!this.guidesEnabled);
+  }
+
+  /**
+   * Alignment guides.
+   *
+   * Geoman ships them as the `snap_guides` helper mode but the free build does
+   * not surface it in any control, so it stays off unless enabled explicitly.
+   * Guides only make sense together with snapping: they show where the cursor
+   * would land, and without snapping it lands elsewhere.
+   */
+  setGuides(enabled: boolean): void {
+    this.guidesEnabled = enabled;
+    if (enabled && !this.snappingEnabled) {
+      this.setSnapping(true);
+    }
+    this.applyGuidesState();
+    this.container
+      ?.querySelector<HTMLElement>('[data-helper="guides"]')
+      ?.classList.toggle(`${CSS_PREFIX}-tool-button--active`, this.guidesEnabled);
+  }
+
+  private applyGuidesState(): void {
+    if (!this.geoman || typeof this.geoman.enableMode !== "function") {
+      return;
+    }
+    try {
+      if (this.guidesEnabled) {
+        this.geoman.enableMode("helper", "snap_guides");
+      } else {
+        this.geoman.disableMode("helper", "snap_guides");
+      }
+    } catch {
+      // Older geoman builds have no such helper; guides simply stay off.
+    }
   }
 
   isTopologyEnabled(): boolean {
