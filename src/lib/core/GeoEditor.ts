@@ -1257,6 +1257,10 @@ export class GeoEditor implements IControl {
   private setupRotateDragHandler(): void {
     this.boundRotateDragDown = (e: MapMouseEvent) => {
       if (this.state.activeEditMode !== "rotate") return;
+      // Left button only. The right one belongs to the map — and to the rotate
+      // popup, which opens on contextmenu; turning the object as well would
+      // mean the same press did two things at once.
+      if (e.originalEvent.button !== 0) return;
       const found =
         this.state.selectedFeatures[0] ??
         (() => {
