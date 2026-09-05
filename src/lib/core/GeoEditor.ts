@@ -70,6 +70,7 @@ import {
   SplitFeature,
   FreehandFeature,
   AngleSnapping,
+  AlignmentGuides,
 } from "../features";
 import { getPolygonFeatures } from "../utils/selectionUtils";
 import { isPolygon, isLine } from "../utils/geometryUtils";
@@ -96,6 +97,7 @@ export class GeoEditor implements IControl {
   private splitFeature: SplitFeature;
   private freehandFeature: FreehandFeature;
   private angleSnapping: AngleSnapping;
+  private alignmentGuides: AlignmentGuides;
 
   // Event listeners
   private boundKeyHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -218,6 +220,7 @@ export class GeoEditor implements IControl {
     this.splitFeature = new SplitFeature();
     this.freehandFeature = new FreehandFeature();
     this.angleSnapping = new AngleSnapping();
+    this.alignmentGuides = new AlignmentGuides();
 
     // Initialize history manager if enabled
     if (this.options.enableHistory !== false) {
@@ -243,6 +246,7 @@ export class GeoEditor implements IControl {
     this.splitFeature.init(map);
     this.freehandFeature.init(map);
     this.angleSnapping.init(map, this.geoman);
+    this.alignmentGuides.init(map, this.geoman);
 
     // Create container
     this.container = document.createElement("div");
@@ -308,6 +312,7 @@ export class GeoEditor implements IControl {
     this.splitFeature.destroy();
     this.freehandFeature.destroy();
     this.angleSnapping.destroy();
+    this.alignmentGuides.destroy();
 
     // Cleanup file input
     if (this.fileInput && this.fileInput.parentNode) {
@@ -330,6 +335,7 @@ export class GeoEditor implements IControl {
   setGeoman(geoman: any): void {
     this.geoman = geoman;
     this.angleSnapping.setGeoman(geoman);
+    this.alignmentGuides.setGeoman(geoman);
     this.setupGeomanEvents();
     this.applySnappingState();
 
@@ -3998,35 +4004,25 @@ export class GeoEditor implements IControl {
   /**
    * Alignment guides.
    *
-   * Geoman ships them as the `snap_guides` helper mode but the free build does
-   * not surface it in any control, so it stays off unless enabled explicitly.
-   * Guides only make sense together with snapping: they show where the cursor
-   * would land, and without snapping it lands elsewhere.
+   * Geoman lists `snap_guides` among its helper modes, but the free build
+   * ships it as `null` and enabling it fails outright — so the guides are
+   * drawn by this package instead. They only make sense together with
+   * snapping: a guide shows where the cursor would land, and without snapping
+   * it lands elsewhere.
    */
   setGuides(enabled: boolean): void {
     this.guidesEnabled = enabled;
     if (enabled && !this.snappingEnabled) {
       this.setSnapping(true);
     }
-    this.applyGuidesState();
+    if (enabled) {
+      this.alignmentGuides.enable();
+    } else {
+      this.alignmentGuides.disable();
+    }
     this.container
       ?.querySelector<HTMLElement>('[data-helper="guides"]')
       ?.classList.toggle(`${CSS_PREFIX}-tool-button--active`, this.guidesEnabled);
-  }
-
-  private applyGuidesState(): void {
-    if (!this.geoman || typeof this.geoman.enableMode !== "function") {
-      return;
-    }
-    try {
-      if (this.guidesEnabled) {
-        this.geoman.enableMode("helper", "snap_guides");
-      } else {
-        this.geoman.disableMode("helper", "snap_guides");
-      }
-    } catch {
-      // Older geoman builds have no such helper; guides simply stay off.
-    }
   }
 
   isTopologyEnabled(): boolean {

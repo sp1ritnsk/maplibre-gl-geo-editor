@@ -190,13 +190,19 @@ export class AngleSnapping {
     }
   }
 
+  /**
+   * Geoman keeps helper instances in `actionInstances` under a
+   * `<type>__<mode>` key, not in a `helpers` map. Reading the wrong place
+   * returned nothing and the publish silently did nothing at all.
+   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private snappingHelper(): any {
-    const helpers = this.geoman?.helpers;
-    if (!helpers) return null;
-    return (
-      helpers.snapping ??
-      (typeof helpers.get === "function" ? helpers.get("snapping") : null)
-    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gm = this.geoman as any;
+    const instance = gm?.actionInstances?.helper__snapping;
+    return instance &&
+      typeof instance.setCustomSnappingCoordinates === "function"
+      ? instance
+      : null;
   }
 }
