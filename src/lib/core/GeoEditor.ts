@@ -1261,16 +1261,16 @@ export class GeoEditor implements IControl {
       // popup, which opens on contextmenu; turning the object as well would
       // mean the same press did two things at once.
       if (e.originalEvent.button !== 0) return;
-      const found =
-        this.state.selectedFeatures[0] ??
-        (() => {
-          const result =
-            this.findFeatureByMouseEvent(e) ??
-            this.findFeatureAtPoint(e.lngLat.lng, e.lngLat.lat);
-          if (!result) return null;
-          this.selectFeatures([result.feature], [result.geomanData]);
-          return this.state.selectedFeatures[0] ?? null;
-        })();
+      // Turn what was grabbed, not whatever happens to be selected: a press on
+      // empty floor used to swing the selected object from across the room.
+      const grabbed =
+        this.findFeatureByMouseEvent(e) ??
+        this.findFeatureAtPoint(e.lngLat.lng, e.lngLat.lat);
+      if (!grabbed) return;
+      if (this.state.selectedFeatures[0]?.feature !== grabbed.feature) {
+        this.selectFeatures([grabbed.feature], [grabbed.geomanData]);
+      }
+      const found = this.state.selectedFeatures[0];
       if (!found) return;
       const feature = found.feature;
       const ring = this.ringOfFeature(feature);
