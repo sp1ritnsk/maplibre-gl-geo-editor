@@ -81,6 +81,30 @@ import { isPolygon, isLine } from "../utils/geometryUtils";
  * GeoEditor - Advanced geometry editing control for MapLibre GL
  * Extends the free Geoman control with advanced features
  */
+/**
+ * Awaits a promise but never hangs on it.
+ *
+ * Geoman's own promises around loading and importing do not always settle —
+ * observed with its free build, where the readiness flag stays false forever
+ * even though drawing works. An unbounded await turned loadGeoJson into a call
+ * that never returned: nothing threw, nothing logged, and everything the
+ * caller meant to do after loading the plan simply never ran.
+ *
+ * Waiting here is an optimisation, not a precondition. Going ahead early can
+ * at worst be retried; hanging has no way out at all.
+ */
+function settleWithin<T>(
+  value: T | Promise<T>,
+  timeout: number = LOAD_READY_TIMEOUT_MS,
+): Promise<T | undefined> {
+  return Promise.race([
+    Promise.resolve(value),
+    new Promise<undefined>((resolve) =>
+      setTimeout(() => resolve(undefined), timeout),
+    ),
+  ]);
+}
+
 export class GeoEditor implements IControl {
   private map!: MapLibreMap;
   private geoman: GeomanInstance | null = null;
@@ -3792,16 +3816,7 @@ export class GeoEditor implements IControl {
       typeof geoman.waitForGeomanLoaded === "function"
     ) {
       try {
-        // Bounded: in some geoman builds this promise never settles, and an
-        // unbounded await turned loadGeoJson into a call that never returns.
-        // Everything after it — including the caller's own work — stopped
-        // silently, with nothing in the console to show for it.
-        await Promise.race([
-          geoman.waitForGeomanLoaded(),
-          new Promise((resolve) =>
-            setTimeout(resolve, LOAD_READY_TIMEOUT_MS),
-          ),
-        ]);
+        await settleWithin(geoman.waitForGeomanLoaded());
       } catch {
         /* best effort; the import below will surface a real failure */
       }
@@ -3809,7 +3824,7 @@ export class GeoEditor implements IControl {
 
     // Clear existing features (await so a reload cannot race the new import)
     try {
-      await this.geoman.features.deleteAll();
+      await settleWithin(this.geoman.features.deleteAll());
     } catch {
       // Fallback: delete features one by one
       this.geoman.features.forEach((fd) => {
@@ -3836,8 +3851,8 @@ export class GeoEditor implements IControl {
     }
 
     // Import the features and wait for completion before reading the count.
-    const importResult = (await this.geoman.features.importGeoJson(
-      featureCollection,
+    const importResult = (await settleWithin(
+      this.geoman.features.importGeoJson(featureCollection),
     )) as GeomanImportResult;
 
     const result: GeoJsonLoadResult = {
