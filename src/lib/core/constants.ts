@@ -14,6 +14,7 @@ export const DEFAULT_DRAW_MODES: DrawMode[] = [
   "polygon",
   "line",
   "rectangle",
+  "angled_rectangle",
   "circle",
   "marker",
 ];

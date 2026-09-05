@@ -30,6 +30,7 @@ export type DrawMode =
   | "text_marker"
   | "line"
   | "rectangle"
+  | "angled_rectangle"
   | "polygon"
   | "massing"
   | "freehand"; // Custom implementation

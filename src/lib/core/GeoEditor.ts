@@ -71,6 +71,7 @@ import {
   FreehandFeature,
   AngleSnapping,
   AlignmentGuides,
+  AngledRectangleFeature,
 } from "../features";
 import { getPolygonFeatures } from "../utils/selectionUtils";
 import { isPolygon, isLine } from "../utils/geometryUtils";
@@ -98,6 +99,7 @@ export class GeoEditor implements IControl {
   private freehandFeature: FreehandFeature;
   private angleSnapping: AngleSnapping;
   private alignmentGuides: AlignmentGuides;
+  private angledRectangle: AngledRectangleFeature;
 
   // Event listeners
   private boundKeyHandler: ((e: KeyboardEvent) => void) | null = null;
@@ -221,6 +223,7 @@ export class GeoEditor implements IControl {
     this.freehandFeature = new FreehandFeature();
     this.angleSnapping = new AngleSnapping();
     this.alignmentGuides = new AlignmentGuides();
+    this.angledRectangle = new AngledRectangleFeature();
 
     // Initialize history manager if enabled
     if (this.options.enableHistory !== false) {
@@ -247,6 +250,7 @@ export class GeoEditor implements IControl {
     this.freehandFeature.init(map);
     this.angleSnapping.init(map, this.geoman);
     this.alignmentGuides.init(map, this.geoman);
+    this.angledRectangle.init(map, this.geoman);
 
     // Create container
     this.container = document.createElement("div");
@@ -313,6 +317,7 @@ export class GeoEditor implements IControl {
     this.freehandFeature.destroy();
     this.angleSnapping.destroy();
     this.alignmentGuides.destroy();
+    this.angledRectangle.destroy();
 
     // Cleanup file input
     if (this.fileInput && this.fileInput.parentNode) {
@@ -336,6 +341,7 @@ export class GeoEditor implements IControl {
     this.geoman = geoman;
     this.angleSnapping.setGeoman(geoman);
     this.alignmentGuides.setGeoman(geoman);
+    this.angledRectangle.setGeoman(geoman);
     this.setupGeomanEvents();
     this.applySnappingState();
 
@@ -1371,6 +1377,8 @@ export class GeoEditor implements IControl {
       // for the same reason as the Geoman draw modes.
       if (mode === "freehand") {
         this.enableFreehandMode();
+      } else if (mode === "angled_rectangle") {
+        this.enableAngledRectangleMode();
       } else if (this.geoman) {
         this.geoman.enableDraw(mode === "massing" ? "polygon" : mode);
         // Apply semi-transparent vertex marker styles after a short delay
@@ -1481,6 +1489,28 @@ export class GeoEditor implements IControl {
   }
 
   /**
+   * Enable the three-click rectangle (custom implementation)
+   */
+  private enableAngledRectangleMode(): void {
+    this.angledRectangle.enable((result) => {
+      if (result.success && result.feature && this.geoman) {
+        const imported = this.geoman.features.importGeoJsonFeature(
+          result.feature,
+        );
+        if (imported) {
+          this.options.onFeatureCreate?.(result.feature);
+          this.emitEvent("gm:create", { feature: result.feature });
+        }
+      }
+      // Mode stays on: units are placed one after another.
+    });
+  }
+
+  private disableAngledRectangleMode(): void {
+    this.angledRectangle.disable();
+  }
+
+  /**
    * Enable an edit mode
    */
   enableEditMode(mode: EditMode): void {
@@ -1544,6 +1574,7 @@ export class GeoEditor implements IControl {
     this.lassoFeature.disable();
     this.splitFeature.cancelSplit();
     this.disableFreehandMode();
+    this.disableAngledRectangleMode();
     this.disableSelectMode();
     this.restoreScaleDragPan();
     this.restoreMultiDragPan();
@@ -4203,6 +4234,7 @@ export class GeoEditor implements IControl {
       polygon: "Polygon",
       massing: "Building massing",
       freehand: "Freehand",
+      angled_rectangle: "Angled rectangle (3 clicks)",
       // Edit modes
       select: "Select (click features)",
       drag: "Drag",
@@ -4263,6 +4295,8 @@ export class GeoEditor implements IControl {
         '<svg viewBox="0 0 24 24" width="18" height="18"><ellipse cx="12" cy="10" rx="8" ry="6" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 2"/><circle cx="12" cy="18" r="3" fill="currentColor"/></svg>',
       freehand:
         '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25z" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
+      angled_rectangle:
+        '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 9.5l6.5-6 11.5 5-6.5 6-11.5-5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="3" cy="9.5" r="1.6" fill="currentColor"/><circle cx="9.5" cy="3.5" r="1.6" fill="currentColor"/></svg>',
       circle_marker:
         '<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="4" fill="currentColor"/></svg>',
       ellipse:

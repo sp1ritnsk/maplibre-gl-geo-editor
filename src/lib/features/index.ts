@@ -9,3 +9,4 @@ export { SplitFeature } from "./SplitFeature";
 export { FreehandFeature } from "./FreehandFeature";
 export { AngleSnapping } from "./AngleSnapping";
 export { AlignmentGuides } from "./AlignmentGuides";
+export { AngledRectangleFeature } from "./AngledRectangleFeature";
