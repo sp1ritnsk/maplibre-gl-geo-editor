@@ -86,6 +86,12 @@ export interface GeoEditorOptions {
   simplifyTolerance?: number;
   /** Enable snapping by default */
   snappingEnabled?: boolean;
+  /** Draw alignment guides while drawing and dragging (default: false) */
+  guidesEnabled?: boolean;
+  /** Lock new sides to 45° steps from the previous side while drawing (default: false) */
+  anglesEnabled?: boolean;
+  /** Log selections, edits and loads to the console (default: false) */
+  debug?: boolean;
   /** Reuse polygon boundaries and propagate edits across shared vertices */
   topologyEnabled?: boolean;
   /** Enable measurements by default */

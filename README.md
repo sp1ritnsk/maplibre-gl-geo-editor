@@ -14,6 +14,7 @@ A powerful MapLibre GL plugin for creating and editing geometries. Extends the f
 - **Polygon** - Draw polygons by clicking points; **double-click or right-click to finish**
 - **Line** - Draw polylines; **double-click or right-click to finish**
 - **Rectangle** - Draw rectangles
+- **Angled rectangle** - Rectangle in three clicks: two set the base edge (its direction and length), the third sets the depth — for anything that stands along a wall
 - **Circle** - Draw circles
 - **Marker** - Place point markers
 - **Freehand** - Draw shapes by dragging (custom implementation)
@@ -21,6 +22,12 @@ A powerful MapLibre GL plugin for creating and editing geometries. Extends the f
 > Polygons and lines can also be completed the Geoman way — by clicking the
 > first/last vertex — but a double-click or right-click ends the shape too, as
 > in most drawing tools.
+
+### Helpers
+- **Snapping** - Geoman's vertex and edge snapping
+- **Alignment guides** - While drawing, the cursor snaps to the continuation of any edge on the plan, to edge midpoints and to the crossing of two continuations; while dragging, the shape's own corners snap onto neighbouring edges and corners, so a shelf lands flush against the wall and in one row with its neighbour. Geometry the editor does not hold (a room outline drawn by the host) is handed in with `setReferenceGeometry()`
+- **Angle snapping** - New sides lock to 45° steps measured from the previous side of the shape being drawn, not from the screen axes
+- **Placement constraint** - `setPlacementConstraint({ enabled, boundary })` keeps shapes inside a boundary and off each other while they are dragged, rotated, scaled or moved as a group: the shape follows the hand and settles at the last legal spot when it is released
 
 ### Basic Edit Tools (via Geoman Free)
 - **Drag** - Move features on the map
@@ -85,8 +92,12 @@ const map = new maplibregl.Map({
 });
 
 map.on('load', () => {
-  // Initialize Geoman
-  const geoman = new Geoman(map, {});
+  // Initialize Geoman. GeoEditor brings its own toolbar, so geoman's is
+  // switched off by its setting. Do not replace `addControls` with a no-op
+  // instead: that method is where geoman marks itself loaded, and without it
+  // `gm:loaded` never fires. (When no geoman is passed, GeoEditor creates one
+  // exactly like this on its own.)
+  const geoman = new Geoman(map, { settings: { useControlsUi: false } });
 
   map.on('gm:loaded', () => {
     // Create GeoEditor
@@ -101,6 +112,8 @@ map.on('load', () => {
       ],
       showFeatureProperties: true,  // Show popup with properties on selection
       fitBoundsOnLoad: true,        // Auto-zoom to extent when loading GeoJSON
+      guidesEnabled: true,          // Alignment guides while drawing and dragging
+      anglesEnabled: true,          // 45° angle lock while drawing
       onFeatureCreate: (feature) => console.log('Created:', feature),
       onSelectionChange: (features) => console.log('Selected:', features.length),
     });
@@ -277,6 +290,10 @@ function App() {
 | `saveFilename` | `string` | `'features.geojson'` | Default filename for saving |
 | `showFeatureProperties` | `boolean` | `false` | Show popup with feature properties when selected |
 | `fitBoundsOnLoad` | `boolean` | `true` | Auto-zoom to extent when loading GeoJSON |
+| `snappingEnabled` | `boolean` | `true` | Geoman's vertex and edge snapping |
+| `guidesEnabled` | `boolean` | `false` | Alignment guides while drawing and dragging (turns snapping on) |
+| `anglesEnabled` | `boolean` | `false` | 45° angle lock while drawing (turns snapping on) |
+| `debug` | `boolean` | `false` | Log selections, edits and loads to the console |
 | `onFeatureCreate` | `(feature) => void` | - | Callback when feature is created |
 | `onFeatureEdit` | `(feature, oldFeature) => void` | - | Callback when feature is edited |
 | `onFeatureDelete` | `(featureId) => void` | - | Callback when feature is deleted |
@@ -304,6 +321,15 @@ function App() {
 geoEditor.enableDrawMode('polygon');
 geoEditor.enableEditMode('scale');
 geoEditor.disableAllModes();
+
+// Helpers
+geoEditor.setGuides(true);
+geoEditor.setAngleSnapping(true);
+geoEditor.setReferenceGeometry([roomOutline]);      // align to shapes the editor does not hold
+geoEditor.setPlacementConstraint({ enabled: true, boundary: roomOutline });
+
+// Selection by id — after loadGeoJson the id is all that survives
+geoEditor.selectFeatureById('shelf-12');
 
 // Selection
 geoEditor.selectFeatures(features);

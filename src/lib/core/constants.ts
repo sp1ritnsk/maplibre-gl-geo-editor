@@ -83,6 +83,9 @@ export const DEFAULT_OPTIONS: GeoEditorOptionsRequired = {
   showLabels: false,
   simplifyTolerance: 0.001,
   snappingEnabled: true,
+  guidesEnabled: false,
+  anglesEnabled: false,
+  debug: false,
   topologyEnabled: false,
   measurementsEnabled: false,
   hideGeomanControl: true,
@@ -117,9 +120,6 @@ export const DEFAULT_OPTIONS: GeoEditorOptionsRequired = {
  * CSS class prefix for the plugin
  */
 export const CSS_PREFIX = "geo-editor";
-
-/** How long loadGeoJson waits for geoman before importing anyway. */
-export const LOAD_READY_TIMEOUT_MS = 3000;
 
 /**
  * Source and layer IDs used by the plugin

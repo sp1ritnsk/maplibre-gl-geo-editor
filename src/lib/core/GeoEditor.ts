@@ -56,7 +56,6 @@ import type { CommandContext } from "./commands";
 import {
   DEFAULT_OPTIONS,
   CSS_PREFIX,
-  LOAD_READY_TIMEOUT_MS,
   ADVANCED_EDIT_MODES,
   INTERNAL_IDS,
 } from "./constants";
@@ -110,33 +109,21 @@ const ROTATE_GUIDE_METRES = 40;
 import { isPolygon, isLine } from "../utils/geometryUtils";
 
 /**
+ * Geoman's own handles on a shape, as this control reaches for them.
+ *
+ * Geoman ships no public type for its `FeatureData`; the few members used
+ * here are named so that access is at least spelled once.
+ */
+interface GeomanShape {
+  id?: string | number;
+  getGeoJson?: () => Feature;
+  geoJson?: Feature;
+}
+
+/**
  * GeoEditor - Advanced geometry editing control for MapLibre GL
  * Extends the free Geoman control with advanced features
  */
-/**
- * Awaits a promise but never hangs on it.
- *
- * Geoman's own promises around loading and importing do not always settle —
- * observed with its free build, where the readiness flag stays false forever
- * even though drawing works. An unbounded await turned loadGeoJson into a call
- * that never returned: nothing threw, nothing logged, and everything the
- * caller meant to do after loading the plan simply never ran.
- *
- * Waiting here is an optimisation, not a precondition. Going ahead early can
- * at worst be retried; hanging has no way out at all.
- */
-function settleWithin<T>(
-  value: T | Promise<T>,
-  timeout: number = LOAD_READY_TIMEOUT_MS,
-): Promise<T | undefined> {
-  return Promise.race([
-    Promise.resolve(value),
-    new Promise<undefined>((resolve) =>
-      setTimeout(() => resolve(undefined), timeout),
-    ),
-  ]);
-}
-
 export class GeoEditor implements IControl {
   private map!: MapLibreMap;
   private geoman: GeomanInstance | null = null;
@@ -194,9 +181,20 @@ export class GeoEditor implements IControl {
    */
   private placementWasValid = true;
   private rotateStartedLegally = true;
+  private scaleStartedLegally = true;
+  private scaleLastValid: Feature | null = null;
+  private multiDragStartedLegally = true;
+  private multiDragLastValid: Feature[] | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private editingData: any = null;
   private boundPlacementMove: ((e: MapMouseEvent) => void) | null = null;
+  private boundPointerDown: ((e: MapMouseEvent) => void) | null = null;
+  /** Where the pointer last was, for a marker that has to start under it. */
+  private lastPointer: Position | null = null;
+  /** True while geoman's marker pointer runs only because a drag needs it. */
+  private pointerEnabledForDrag = false;
+  /** True while loadGeoJson replaces the store; nothing then is a user edit. */
+  private loadingGeoJson = false;
   private boundRotateContextMenu: ((e: MapMouseEvent) => void) | null = null;
 
   // Selection mode state
@@ -292,6 +290,10 @@ export class GeoEditor implements IControl {
     // Initialize snapping from options
     this.snappingEnabled = this.options.snappingEnabled;
     this.topologyEnabled = this.options.topologyEnabled;
+    this.guidesEnabled = this.options.guidesEnabled;
+    this.anglesEnabled = this.options.anglesEnabled;
+    // Guides and the angle lock only work through geoman's snapping.
+    if (this.guidesEnabled || this.anglesEnabled) this.snappingEnabled = true;
 
     // Initialize feature handlers
     this.copyFeature = new CopyFeature();
@@ -335,6 +337,7 @@ export class GeoEditor implements IControl {
     this.angleSnapping.init(map, this.geoman);
     this.alignmentGuides.init(map, this.geoman);
     this.angledRectangle.init(map, this.geoman);
+    if (this.anglesEnabled) this.angleSnapping.enable();
 
     // Create container
     this.container = document.createElement("div");
@@ -448,17 +451,12 @@ export class GeoEditor implements IControl {
     import("@geoman-io/maplibre-geoman-free")
       .then(({ Geoman }) => {
         if (this.map && !this.geoman) {
-          const geoman = new Geoman(this.map);
-          // Prevent Geoman from adding its default controls to the map
-          // (GeoEditor provides its own toolbar). The addControls() method
-          // is called asynchronously from Geoman's init(), so overriding
-          // it before the async chain resolves is safe.
-          geoman.addControls = async () => {};
-          // Also override removeControls to a no-op since addControls was
-          // never called — calling removeControls would try to detach events
-          // that were never attached, causing console warnings.
-          geoman.removeControls = () => {};
-          this.setGeoman(geoman);
+          // GeoEditor brings its own toolbar, so geoman's is switched off by
+          // its setting rather than by replacing `addControls` with a no-op.
+          // That method is also where geoman marks itself loaded and fires
+          // `gm:loaded`; a no-op left it unloaded forever, and every wait on
+          // its readiness — `loadGeoJson` included — hung.
+          this.setGeoman(new Geoman(this.map, { settings: { useControlsUi: false } }));
         }
       })
       .catch(() => {
@@ -786,6 +784,8 @@ export class GeoEditor implements IControl {
       e.preventDefault();
       this.isScaling = true;
       this.scaleStartFeature = this.scaleTargetFeature;
+      this.scaleStartedLegally = this.mayStand(this.scaleTargetFeature);
+      this.scaleLastValid = null;
       this.disableScaleDragPan();
       this.scaleFeature.startScale(
         this.scaleTargetFeature,
@@ -809,6 +809,11 @@ export class GeoEditor implements IControl {
         e.lngLat.lat,
       ]);
       if (scaled) {
+        // Same rule as dragging: the shape follows the hand and remembers the
+        // last size at which it still stood legally.
+        if (this.scaleStartedLegally && this.mayStand(scaled)) {
+          this.scaleLastValid = scaled;
+        }
         this.applyScaledFeature(scaled);
       }
     };
@@ -823,6 +828,12 @@ export class GeoEditor implements IControl {
       this.restoreScaleDragPan();
 
       if (result) {
+        if (this.scaleStartedLegally && !this.mayStand(result.feature)) {
+          // Scaled into a wall or onto a neighbour: settle at the last legal
+          // size, or where it started if there was none.
+          result.feature =
+            this.scaleLastValid ?? this.scaleStartFeature ?? result.feature;
+        }
         this.applyScaledFeature(result.feature);
         if (this.scaleStartFeature) {
           this.options.onFeatureEdit?.(result.feature, this.scaleStartFeature);
@@ -1123,6 +1134,10 @@ export class GeoEditor implements IControl {
       this.multiDragGeomanData = this.state.selectedFeatures.map(
         (s) => s.geomanData ?? this.findGeomanDataForFeature(s.feature),
       );
+      this.multiDragStartedLegally = this.groupMayStand(
+        this.multiDragOriginalFeatures,
+      );
+      this.multiDragLastValid = null;
 
       this.disableMultiDragPan();
     };
@@ -1159,6 +1174,9 @@ export class GeoEditor implements IControl {
           feature: updated[index] ?? s.feature,
         }),
       );
+      if (this.multiDragStartedLegally && this.groupMayStand(updated)) {
+        this.multiDragLastValid = updated;
+      }
 
       this.updateSelectionHighlight();
     };
@@ -1170,6 +1188,24 @@ export class GeoEditor implements IControl {
 
       this.isMultiDragging = false;
       this.restoreMultiDragPan();
+
+      // The group is held at its last legal spot the way a single shape is.
+      const current = this.state.selectedFeatures.map((s) => s.feature);
+      if (this.multiDragStartedLegally && !this.groupMayStand(current)) {
+        const restore = this.multiDragLastValid ?? this.multiDragOriginalFeatures;
+        restore.forEach((feature, index) => {
+          const geomanData = this.multiDragGeomanData[index];
+          if (geomanData?.updateGeometry) {
+            geomanData.updateGeometry(feature.geometry);
+          } else if (geomanData?.updateGeoJsonGeometry) {
+            geomanData.updateGeoJsonGeometry(feature.geometry);
+          }
+        });
+        this.state.selectedFeatures = this.state.selectedFeatures.map(
+          (s, index) => ({ ...s, feature: restore[index] ?? s.feature }),
+        );
+        this.updateSelectionHighlight();
+      }
 
       if (this.state.selectedFeatures.length > 0) {
         this.state.selectedFeatures.forEach((featureState, index) => {
@@ -1340,6 +1376,26 @@ export class GeoEditor implements IControl {
     );
   }
 
+  /**
+   * May these shapes, moved together, stand where they are?
+   *
+   * Members of the group keep their distances, so they are checked against
+   * everything else only: a group that did not overlap itself before the move
+   * does not overlap itself after it.
+   */
+  private groupMayStand(features: Feature[]): boolean {
+    if (!this.placementConstraint) return true;
+    const ids = new Set(
+      features
+        .map((feature) => this.getGeomanIdFromFeature(feature))
+        .filter((id): id is string => id !== null),
+    );
+    const neighbours = this.neighboursExcluding(ids);
+    return features.every((feature) =>
+      canStand(feature, this.placementBoundary, neighbours),
+    );
+  }
+
 
   /**
    * Remembers the last spot the object was allowed to occupy.
@@ -1351,13 +1407,18 @@ export class GeoEditor implements IControl {
    * therefore the end of the gesture, not the middle of it.
    */
   private setupPlacementHandler(): void {
-    this.boundPlacementMove = () => {
+    this.boundPlacementMove = (e: MapMouseEvent) => {
+      this.lastPointer = [e.lngLat.lng, e.lngLat.lat];
       if (!this.placementConstraint || !this.editingData || !this.placementWasValid) return;
       const feature = this.getGeomanFeature(this.editingData);
       if (!feature || !this.mayStand(feature)) return;
       this.lastValidGeometry = cloneGeometry(feature.geometry);
     };
+    this.boundPointerDown = (e: MapMouseEvent) => {
+      this.lastPointer = [e.lngLat.lng, e.lngLat.lat];
+    };
     this.map.on("mousemove", this.boundPlacementMove);
+    this.map.on("mousedown", this.boundPointerDown);
   }
 
   /**
@@ -1390,6 +1451,101 @@ export class GeoEditor implements IControl {
       this.map.off("mousemove", this.boundPlacementMove);
       this.boundPlacementMove = null;
     }
+    if (this.boundPointerDown) {
+      this.map.off("mousedown", this.boundPointerDown);
+      this.boundPointerDown = null;
+    }
+  }
+
+  /** Everything on the plan except the given shapes, by geoman id. */
+  private neighboursExcluding(ids: Set<string>): Feature[] {
+    if (!this.geoman) return [];
+    const list: Feature[] = [];
+    try {
+      this.geoman.features.forEach((data) => {
+        if (ids.has(String(data.id))) return;
+        const feature = this.getGeomanFeature(data);
+        if (feature) list.push(feature);
+      });
+    } catch {
+      return [];
+    }
+    return list;
+  }
+
+  // ==========================================================================
+  // Guides while dragging
+  // ==========================================================================
+
+  /**
+   * Let the guides follow the dragged shape and let geoman snap to them.
+   *
+   * Geoman moves a dragged shape by exactly what its marker pointer moves,
+   * and that pointer is what its snapping acts on — but in drag mode geoman
+   * never enables the pointer, so nothing would snap. It is enabled here for
+   * the length of the drag, invisibly, the same way geoman's own vertex
+   * editing does it. Geoman's snapping of the bare cursor to neighbouring
+   * corners is switched off for the drag by excluding every other shape:
+   * the cursor sits somewhere inside the object, and where *it* crosses a
+   * neighbour's corner says nothing about where the object stands.
+   */
+  private beginDragGuides(data: GeomanShape): void {
+    const own = data.id === undefined ? null : String(data.id);
+    this.alignmentGuides.setDragged(data, own);
+    if (!this.guidesEnabled) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gm = this.geoman as any;
+    const pointer = gm?.markerPointer;
+    if (pointer && !pointer.marker && typeof pointer.enable === "function") {
+      try {
+        pointer.enable({ invisibleMarker: true, lngLat: this.lastPointer ?? [0, 0] });
+        this.pointerEnabledForDrag = true;
+      } catch {
+        this.pointerEnabledForDrag = false;
+      }
+    }
+    const helper = gm?.actionInstances?.helper__snapping;
+    if (helper && typeof helper.addExcludedFeature === "function") {
+      try {
+        gm.features.forEach((other: GeomanShape) => {
+          if (own === null || String(other.id) !== own) helper.addExcludedFeature(other);
+        });
+      } catch {
+        /* geoman's own cursor snapping simply stays on */
+      }
+    }
+  }
+
+  private endDragGuides(): void {
+    this.alignmentGuides.setDragged(null);
+    if (!this.pointerEnabledForDrag) return;
+    this.pointerEnabledForDrag = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pointer = (this.geoman as any)?.markerPointer;
+    try {
+      pointer?.disable?.();
+    } catch {
+      /* already gone */
+    }
+  }
+
+  /**
+   * The dragged shape settled onto its guides.
+   *
+   * Live snapping pulls the shape into line while the hand moves; whatever the
+   * last frame left over is settled here, once, when the hand lets go.
+   */
+  private alignOnRelease(feature: Feature): Feature {
+    if (!this.guidesEnabled || !this.editingData) return feature;
+    const own = this.editingData.id === undefined ? null : String(this.editingData.id);
+    const aligned = this.alignmentGuides.alignedGeometry(feature, own);
+    if (!aligned) return feature;
+    if (this.editingData.updateGeometry) {
+      this.editingData.updateGeometry(aligned);
+    } else {
+      this.editingData.updateGeoJsonGeometry?.(aligned);
+    }
+    return { ...feature, geometry: aligned };
   }
 
   private setupRotateDragHandler(): void {
@@ -1555,6 +1711,7 @@ export class GeoEditor implements IControl {
     action: string,
     feature?: Feature | null,
   ): void {
+    if (!this.options.debug) return;
     const featureId = feature ? this.getGeomanIdFromFeature(feature) : null;
     console.log("GeoEditor", {
       action,
@@ -1562,6 +1719,28 @@ export class GeoEditor implements IControl {
       feature,
       selection: this.getSelectedFeatureCollection(),
     });
+  }
+
+  /** Is this geoman record the (single) selected shape? */
+  private isSelected(data: GeomanShape): boolean {
+    const selected = this.state.selectedFeatures;
+    return (
+      selected.length === 1 &&
+      data.id !== undefined &&
+      selected[0].id === String(data.id)
+    );
+  }
+
+  /** Keep the selection's copy of a shape current after geoman moved it. */
+  private refreshSelected(feature: Feature): void {
+    const id = this.getGeomanIdFromFeature(feature);
+    const index = this.state.selectedFeatures.findIndex((s) => s.id === id);
+    if (index === -1) return;
+    this.state.selectedFeatures[index] = {
+      ...this.state.selectedFeatures[index],
+      feature,
+    };
+    this.updateSelectionHighlight();
   }
 
   private extractFeatureFromEvent(featureLike: unknown): Feature | null {
@@ -1718,6 +1897,8 @@ export class GeoEditor implements IControl {
       // pass it yet still fire this stale enable before B's teardown settled.
       if (this.drawRequestId !== requestId) return;
 
+      // A new shape starts with no previous side to measure angles from.
+      this.angleSnapping.reset();
       // Freehand uses our own implementation (not available in Geoman free) and
       // attaches its own canvas handlers, so it is sequenced after the teardown
       // for the same reason as the Geoman draw modes.
@@ -1727,9 +1908,8 @@ export class GeoEditor implements IControl {
         this.enableAngledRectangleMode();
       } else if (this.geoman) {
         this.geoman.enableDraw(mode === "massing" ? "polygon" : mode);
-        // Apply semi-transparent vertex marker styles after a short delay
-        // to allow Geoman to create its drawing layers
-        setTimeout(() => this.applyVertexMarkerStyles(), 50);
+        // Geoman's marker layers get their softer look from the `styledata`
+        // listener, which fires as soon as geoman adds them.
       }
     };
     teardown.then(activate).catch(activate);
@@ -1881,7 +2061,6 @@ export class GeoEditor implements IControl {
           // Handled by setupRotateDragHandler: geoman's own rotate mode offers
           // no point at which the live angle could be pulled onto a wall.
           break;
-          break;
         case "cut":
           this.geoman.enableGlobalCutMode();
           break;
@@ -1919,6 +2098,7 @@ export class GeoEditor implements IControl {
     }
 
     // Disable advanced modes
+    this.endDragGuides();
     this.scaleFeature.cancelScale();
     this.closeRotatePopup();
     this.lassoFeature.disable();
@@ -2357,6 +2537,31 @@ export class GeoEditor implements IControl {
       this.hideAttributePanel();
       this.hideFeaturePropertiesPopup();
     }
+  }
+
+  /**
+   * Select the shape geoman holds under this id.
+   *
+   * Hosts keep their own lists of what is on the map; picking an item there
+   * has to highlight the same shape here, and after `loadGeoJson` the only
+   * thing that survives is the id. Returns false when nothing has that id.
+   */
+  selectFeatureById(id: string): boolean {
+    if (!this.geoman) return false;
+    let found: { feature: Feature; data: GeomanFeatureData } | null = null;
+    try {
+      this.geoman.features.forEach((data) => {
+        if (found || String(data.id) !== id) return;
+        const feature = this.getGeomanFeature(data);
+        if (feature) found = { feature, data };
+      });
+    } catch {
+      return false;
+    }
+    if (!found) return false;
+    const hit: { feature: Feature; data: GeomanFeatureData } = found;
+    this.selectFeatures([hit.feature], [hit.data]);
+    return true;
   }
 
   /**
@@ -4110,13 +4315,17 @@ export class GeoEditor implements IControl {
   }
 
   /**
-   * Load GeoJSON data into the editor.
+   * Load GeoJSON data into the editor, replacing whatever it held.
    *
-   * Resolves once geoman has finished importing the features. This is `async`
-   * because geoman's `deleteAll` and `importGeoJson` are asynchronous in current
-   * geoman releases: awaiting them prevents a reload from racing the previous
-   * clear, and lets the returned `count` reflect the actual import result rather
-   * than a not-yet-resolved promise.
+   * Waits for geoman to be ready, then for its clear and its import: both are
+   * asynchronous, and a reload must not race the clear before it. Nothing in
+   * here is bounded by a timer — geoman settles on its own once it is set up
+   * the way it documents (see `_autoInitGeoman`), and a timer that resolves
+   * quietly on failure only hides where the failure was.
+   *
+   * A load is a new baseline: the removals it causes are not user edits and
+   * are kept out of the undo history, and the history itself is cleared —
+   * undoing into a plan that has just been replaced makes no sense.
    *
    * @param geoJson - FeatureCollection or Feature to load
    * @param filename - Optional filename for logging
@@ -4129,44 +4338,6 @@ export class GeoEditor implements IControl {
     if (!this.geoman) {
       throw new Error("Geoman not initialized");
     }
-
-    // Geoman initializes its feature sources asynchronously; importing before it
-    // is ready fails with "Missing source for feature creation" and silently
-    // drops the features. Wait for readiness when the running geoman exposes it.
-    const geoman = this.geoman as {
-      loaded?: boolean;
-      waitForGeomanLoaded?: () => Promise<unknown>;
-    };
-    if (
-      geoman.loaded === false &&
-      typeof geoman.waitForGeomanLoaded === "function"
-    ) {
-      try {
-        await settleWithin(geoman.waitForGeomanLoaded());
-      } catch {
-        /* best effort; the import below will surface a real failure */
-      }
-    }
-
-    // Clear existing features (await so a reload cannot race the new import)
-    try {
-      await settleWithin(this.geoman.features.deleteAll());
-    } catch {
-      /* handled by the sweep below */
-    }
-    // deleteAll() is raced against a timeout, and a timeout resolves as
-    // quietly as success does. Import on top of a store that was not actually
-    // emptied leaves the old shapes next to the new ones — a plan showing its
-    // outline twice, one where it was and one where it was dragged. So the
-    // store is swept before anything is added to it.
-    this.geoman.features.forEach((fd) => {
-      try {
-        fd.delete();
-      } catch {
-        /* ignore */
-      }
-    });
-    this.clearSelection();
 
     // Normalize to FeatureCollection
     let featureCollection: FeatureCollection;
@@ -4181,10 +4352,32 @@ export class GeoEditor implements IControl {
       throw new Error("Invalid GeoJSON: expected Feature or FeatureCollection");
     }
 
-    // Import the features and wait for completion before reading the count.
-    const importResult = (await settleWithin(
-      this.geoman.features.importGeoJson(featureCollection),
-    )) as GeomanImportResult;
+    // Geoman creates its feature sources asynchronously; importing before it
+    // is ready fails with "Missing source for feature creation" and silently
+    // drops the features.
+    const geoman = this.geoman as {
+      loaded?: boolean;
+      waitForGeomanLoaded?: () => Promise<unknown>;
+    };
+    if (
+      geoman.loaded === false &&
+      typeof geoman.waitForGeomanLoaded === "function"
+    ) {
+      await geoman.waitForGeomanLoaded();
+    }
+
+    this.loadingGeoJson = true;
+    let importResult: GeomanImportResult;
+    try {
+      await this.geoman.features.deleteAll();
+      this.clearSelection();
+      importResult = (await this.geoman.features.importGeoJson(
+        featureCollection,
+      )) as GeomanImportResult;
+    } finally {
+      this.loadingGeoJson = false;
+    }
+    this.historyManager?.clear();
 
     const result: GeoJsonLoadResult = {
       features: featureCollection.features,
@@ -4206,7 +4399,9 @@ export class GeoEditor implements IControl {
     // Emit event
     this.emitEvent("gm:geojsonload", result);
 
-    console.log(`GeoEditor: Loaded ${result.count} features from ${filename}`);
+    if (this.options.debug) {
+      console.log(`GeoEditor: Loaded ${result.count} features from ${filename}`);
+    }
 
     return result;
   }
@@ -4313,7 +4508,9 @@ export class GeoEditor implements IControl {
     // Emit event
     this.emitEvent("gm:geojsonsave", result);
 
-    console.log(`GeoEditor: Saved ${result.count} features to ${saveFilename}`);
+    if (this.options.debug) {
+      console.log(`GeoEditor: Saved ${result.count} features to ${saveFilename}`);
+    }
 
     return result;
   }
@@ -4865,6 +5062,12 @@ export class GeoEditor implements IControl {
     this.geoman.setGlobalEventsListener((event) => {
       const eventName =
         (event as { name?: string; type?: string }).name ?? event.type ?? "";
+      // Geoman hands the listener every event twice: once as its internal
+      // system event (`_gm:edit`, …) and once converted for the map
+      // (`gm:dragend`, `gm:remove`, …). Both carry the same action, so both
+      // would run the branches below — a drag ended twice, edited twice,
+      // saved twice by the host. Only the converted form is handled.
+      if (!eventName.startsWith("gm:")) return;
       const eventFeature = this.extractFeatureFromEvent(
         (event as { feature?: unknown }).feature,
       );
@@ -4892,6 +5095,8 @@ export class GeoEditor implements IControl {
         }
         const createdFeature = this.applyTopologyToCreatedFeature(eventFeature);
         if (!createdFeature) return;
+        // The next shape starts fresh: its first side is drawn freely.
+        this.angleSnapping.reset();
         this.lastCreatedFeature = createdFeature;
         this.options.onFeatureCreate?.(createdFeature);
         this.logSelectedFeatureCollection("created", createdFeature);
@@ -4926,6 +5131,15 @@ export class GeoEditor implements IControl {
             this.findGeomanDataForFeature(eventFeature);
           this.lastValidGeometry = cloneGeometry(eventFeature.geometry);
           this.placementWasValid = this.mayStand(eventFeature);
+          // Taking hold of a shape selects it: the host's property panel and
+          // the highlight on the map must show the object under the hand,
+          // not whatever was clicked before.
+          if (this.editingData && !this.isSelected(this.editingData)) {
+            this.selectFeatures([eventFeature], [this.editingData]);
+          }
+          if (eventName === "gm:dragstart" && this.editingData) {
+            this.beginDragGuides(this.editingData);
+          }
         } catch {
           this.editingData = null;
           this.placementWasValid = false;
@@ -4934,7 +5148,11 @@ export class GeoEditor implements IControl {
 
       // Handle feature edit end
       if (eventAction === "feature_edit_end" && eventFeature) {
-        const settled = this.holdAtLastValid(eventFeature);
+        const dragged = eventName === "gm:dragend";
+        this.endDragGuides();
+        const settled = this.holdAtLastValid(
+          dragged ? this.alignOnRelease(eventFeature) : eventFeature,
+        );
         let topologyEdits: Array<{
           oldFeature: Feature;
           newFeature: Feature;
@@ -4948,6 +5166,7 @@ export class GeoEditor implements IControl {
         this.editingData = null;
         this.lastValidGeometry = null;
         this.lastEditedFeature = settled;
+        this.refreshSelected(settled);
         this.logSelectedFeatureCollection("edited", settled);
         // Notify the host application. Dragging a feature and editing its
         // vertices end here and nowhere else: without this call the change
@@ -4973,13 +5192,25 @@ export class GeoEditor implements IControl {
         }
       }
 
-      // Handle feature removed
-      if (eventAction === "feature_removed" && eventFeature) {
+      // Handle feature removed. Only geoman's own removal tool fires this:
+      // deleting through its features API — the Delete key and the history
+      // go that way — is silent, and those paths report to the host
+      // themselves. So a removal seen here is one the host has not heard of.
+      // Removals made while a plan is being loaded are the load's doing, not
+      // the user's, and are neither reported nor recorded.
+      if (eventAction === "feature_removed" && eventFeature && !this.loadingGeoJson) {
+        const removedId =
+          asGeomanData(event.feature)?.id !== undefined
+            ? String(asGeomanData(event.feature).id)
+            : this.getGeomanIdFromFeature(eventFeature);
         this.lastDeletedFeature = eventFeature;
-        this.lastDeletedFeatureId = this.getGeomanIdFromFeature(eventFeature);
+        this.lastDeletedFeatureId = removedId;
         this.logSelectedFeatureCollection("deleted", eventFeature);
         // Record delete operation in history
         this.recordDeleteOperation(eventFeature);
+        if (removedId !== null) {
+          this.options.onFeatureDelete?.(removedId);
+        }
       }
 
       // Handle mode changes
@@ -5078,6 +5309,7 @@ export class GeoEditor implements IControl {
   private recordCreateOperation(feature: Feature): void {
     if (
       !this.historyManager ||
+      this.loadingGeoJson ||
       this.historyManager.isExecutingCommand() ||
       this.isPerformingCompositeOperation
     ) {
@@ -5099,6 +5331,7 @@ export class GeoEditor implements IControl {
   private recordEditOperation(oldFeature: Feature, newFeature: Feature): void {
     if (
       !this.historyManager ||
+      this.loadingGeoJson ||
       this.historyManager.isExecutingCommand() ||
       this.isPerformingCompositeOperation
     ) {
@@ -5155,6 +5388,7 @@ export class GeoEditor implements IControl {
   private recordDeleteOperation(feature: Feature): void {
     if (
       !this.historyManager ||
+      this.loadingGeoJson ||
       this.historyManager.isExecutingCommand() ||
       this.isPerformingCompositeOperation
     ) {
@@ -5207,6 +5441,8 @@ export class GeoEditor implements IControl {
    * Update history button states (enabled/disabled).
    */
   private updateHistoryButtonStates(canUndo: boolean, canRedo: boolean): void {
+    // History may change before the control is on a map — nothing to update.
+    if (!this.container) return;
     const undoBtn = this.container.querySelector(
       '[data-history="undo"]',
     ) as HTMLButtonElement | null;

@@ -156,33 +156,17 @@ export class AngledRectangleFeature {
   /**
    * Cursor position with geoman's snapping applied.
    *
-   * The tool draws outside geoman, so nothing snaps it for free; asking the
-   * snapping helper directly keeps this tool obeying the same targets — walls,
-   * vertices, guides — as everything else on the map.
+   * The tool draws outside geoman, so nothing snaps it for free. Asking the
+   * snapping helper for its full answer keeps this tool obeying the same
+   * targets as every other tool: vertices and edges of what is drawn, and the
+   * positions published by the guides and the angle lock.
    */
   private snapped(event: MapMouseEvent): Position {
     const raw: Position = [event.lngLat.lng, event.lngLat.lat];
     const helper = this.geoman?.actionInstances?.helper__snapping;
-    const features = this.featureData();
-    if (!helper || features.length === 0) return raw;
-
-    const point = { x: event.point.x, y: event.point.y };
-    const byPoint = helper.getFeaturePointsSnapping?.(features, raw, point);
-    if (byPoint) return [byPoint[0], byPoint[1]];
-    const byLine = helper.getFeatureLinesSnapping?.(features, raw, point);
-    if (byLine) return [byLine[0], byLine[1]];
-    return raw;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private featureData(): any[] {
-    const store = this.geoman?.features;
-    if (!store || typeof store.forEach !== "function") return [];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const list: any[] = [];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    store.forEach((item: any) => list.push(item));
-    return list;
+    if (!helper || typeof helper.getSnappedLngLat !== "function") return raw;
+    const snapped = helper.getSnappedLngLat(raw, [event.point.x, event.point.y]);
+    return snapped ? [snapped[0], snapped[1]] : raw;
   }
 
   private ensureLayers(): void {
