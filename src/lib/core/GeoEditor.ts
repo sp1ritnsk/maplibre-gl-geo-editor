@@ -1415,6 +1415,7 @@ export class GeoEditor implements IControl {
 
     this.state.activeDrawMode = mode;
     this.state.isDrawing = true;
+    this.syncGuides();
     this.options.onModeChange?.(mode);
     this.updateToolbarState();
   }
@@ -1573,6 +1574,7 @@ export class GeoEditor implements IControl {
 
     this.state.activeEditMode = mode;
     this.state.isEditing = true;
+    this.syncGuides();
     this.options.onModeChange?.(mode);
     this.updateToolbarState();
   }
@@ -1622,6 +1624,7 @@ export class GeoEditor implements IControl {
     this.state.activeEditMode = null;
     this.state.isDrawing = false;
     this.state.isEditing = false;
+    this.syncGuides();
     this.updateToolbarState();
 
     // Note: snapping state is NOT reset here - it's independent.
@@ -4071,14 +4074,28 @@ export class GeoEditor implements IControl {
     if (enabled && !this.snappingEnabled) {
       this.setSnapping(true);
     }
-    if (enabled) {
+    this.syncGuides();
+    this.container
+      ?.querySelector<HTMLElement>('[data-helper="guides"]')
+      ?.classList.toggle(`${CSS_PREFIX}-tool-button--active`, this.guidesEnabled);
+  }
+
+  /**
+   * Guides follow the armed tool, not just the toggle.
+   *
+   * The toggle says the user wants them; a guide is still only meaningful
+   * while something is being drawn or edited. Left on their own they light up
+   * under every cursor move over the map, and a hint that is always on the
+   * screen tells the reader nothing about the plan underneath it.
+   */
+  private syncGuides(): void {
+    const editing =
+      this.state.activeDrawMode !== null || this.state.activeEditMode !== null;
+    if (this.guidesEnabled && editing) {
       this.alignmentGuides.enable();
     } else {
       this.alignmentGuides.disable();
     }
-    this.container
-      ?.querySelector<HTMLElement>('[data-helper="guides"]')
-      ?.classList.toggle(`${CSS_PREFIX}-tool-button--active`, this.guidesEnabled);
   }
 
   isTopologyEnabled(): boolean {
