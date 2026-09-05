@@ -50,6 +50,7 @@ export class AlignmentGuides {
   private readonly color: string;
   private handleMouseMove: ((e: MapMouseEvent) => void) | null = null;
   private referenceEdges: Array<[Position, Position]> = [];
+  private suspended = false;
 
   constructor(options: AlignmentGuidesOptions = {}) {
     this.tolerance = options.tolerance ?? 8;
@@ -112,7 +113,7 @@ export class AlignmentGuides {
    * наклонённой камерой это разные плоскости.
    */
   private update(event: MapMouseEvent): void {
-    if (!this.map) return;
+    if (!this.map || this.suspended) return;
     const cursorPixel: Pixel = { x: event.point.x, y: event.point.y };
     const frame = frameAt([event.lngLat.lng, event.lngLat.lat]);
     const cursor = toGround([event.lngLat.lng, event.lngLat.lat], frame);
@@ -246,6 +247,18 @@ export class AlignmentGuides {
       }
     }
     this.referenceEdges = list;
+  }
+
+  /**
+   * Hand the guide layer over to someone else for a while.
+   *
+   * Both this helper and the rotation snapping draw on mousemove; whichever
+   * runs last wins, and the cursor-alignment guides are meaningless anyway
+   * while the cursor is swinging an object around its pivot.
+   */
+  setSuspended(suspended: boolean): void {
+    this.suspended = suspended;
+    if (suspended) this.draw([]);
   }
 
   /** Draw guide lines chosen by someone else — the rotation snapping does. */

@@ -1283,6 +1283,7 @@ export class GeoEditor implements IControl {
       ]);
       this.rotateDragOwn = principalDirection(ring) ?? 0;
       this.isRotatingByDrag = true;
+      this.alignmentGuides.setSuspended(true);
       this.disableScaleDragPan();
     };
 
@@ -1324,6 +1325,7 @@ export class GeoEditor implements IControl {
       this.isRotatingByDrag = false;
       this.restoreScaleDragPan();
       this.alignmentGuides.showLines([]);
+      this.alignmentGuides.setSuspended(false);
       const original = this.rotateDragStart;
       const rotated = this.state.selectedFeatures[0]?.feature;
       this.rotateDragStart = null;
