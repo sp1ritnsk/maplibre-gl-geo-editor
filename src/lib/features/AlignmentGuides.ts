@@ -3,7 +3,6 @@ import type { GeoJSONSource, Map as MapLibreMap, MapMouseEvent } from "maplibre-
 
 import {
   distance,
-  distanceToLine,
   extend,
   footOnLine,
   lineIntersection,
@@ -11,6 +10,7 @@ import {
   type Pixel,
   type Segment,
 } from "../utils/guideGeometry";
+import { frameAt, type Frame, type Ground, toGround, toPosition } from "../utils/groundPlane";
 
 export interface AlignmentGuidesOptions {
   /** How close in pixels counts as aligned. Default: 8 */
@@ -104,60 +104,76 @@ export class AlignmentGuides {
    * горизонталь и вертикаль сюда не входят намеренно — через какую-нибудь
    * вершину они проходят почти всегда, и направляющая, которая горит
    * постоянно, не говорит ничего.
+   *
+   * Сама геометрия считается на земле, а допуск — по экрану: направление
+   * продолжения задаёт план, а «достаточно близко» задаёт рука с мышью, и под
+   * наклонённой камерой это разные плоскости.
    */
   private update(event: MapMouseEvent): void {
     if (!this.map) return;
-    const cursor: Pixel = { x: event.point.x, y: event.point.y };
+    const cursorPixel: Pixel = { x: event.point.x, y: event.point.y };
+    const frame = frameAt([event.lngLat.lng, event.lngLat.lat]);
+    const cursor = toGround([event.lngLat.lng, event.lngLat.lat], frame);
     const edges = this.edges().map(
-      (edge): Segment => [this.toPixel(edge[0]), this.toPixel(edge[1])],
+      (edge): Segment => [toGround(edge[0], frame), toGround(edge[1], frame)],
     );
 
     // Рёбра, продолжение которых проходит под курсором.
     const engaged = edges
-      .map((edge) => ({ edge, gap: distanceToLine(cursor, edge) }))
-      .filter(
-        (item): item is { edge: Segment; gap: number } =>
-          item.gap !== null && item.gap <= this.tolerance,
-      )
+      .map((edge) => ({ edge, foot: footOnLine(cursor, edge) }))
+      .filter((item): item is { edge: Segment; foot: Ground } => item.foot !== null)
+      .map((item) => ({
+        ...item,
+        gap: this.screenGap(cursorPixel, item.foot, frame),
+      }))
+      .filter((item) => item.gap <= this.tolerance)
       .sort((left, right) => left.gap - right.gap)
       .slice(0, 2);
 
     if (engaged.length >= 2) {
       const crossing = lineIntersection(engaged[0].edge, engaged[1].edge);
-      if (crossing && distance(crossing, cursor) <= this.crossingTolerance) {
-        this.show([engaged[0].edge, engaged[1].edge], crossing);
+      if (
+        crossing &&
+        this.screenGap(cursorPixel, crossing, frame) <= this.crossingTolerance
+      ) {
+        this.show([engaged[0].edge, engaged[1].edge], crossing, frame);
         return;
       }
     }
 
-    const middle = this.nearestMidpoint(cursor, edges);
+    const middle = this.nearestMidpoint(cursorPixel, edges, frame);
     if (middle) {
-      this.show([middle.edge], middle.point);
+      this.show([middle.edge], middle.point, frame);
       return;
     }
 
     if (engaged.length >= 1) {
-      const foot = footOnLine(cursor, engaged[0].edge);
-      if (foot) {
-        this.show([engaged[0].edge], foot);
-        return;
-      }
+      this.show([engaged[0].edge], engaged[0].foot, frame);
+      return;
     }
 
     this.draw([]);
     this.clearSnapping();
   }
 
+  /** Насколько точка на земле далека от курсора в пикселях экрана. */
+  private screenGap(cursor: Pixel, point: Ground, frame: Frame): number {
+    const position = toPosition(point, frame);
+    const projected = this.map!.project([position[0], position[1]]);
+    return distance(cursor, { x: projected.x, y: projected.y });
+  }
+
   /** Середина ребра — по ней ставят стеллаж по центру прохода. */
   private nearestMidpoint(
     cursor: Pixel,
     edges: Segment[],
-  ): { edge: Segment; point: Pixel } | null {
-    let best: { edge: Segment; point: Pixel } | null = null;
+    frame: Frame,
+  ): { edge: Segment; point: Ground } | null {
+    let best: { edge: Segment; point: Ground } | null = null;
     let bestGap = this.tolerance;
     for (const edge of edges) {
       const point = midpoint(edge);
-      const gap = distance(cursor, point);
+      const gap = this.screenGap(cursor, point, frame);
       if (gap <= bestGap) {
         bestGap = gap;
         best = { edge, point };
@@ -166,23 +182,28 @@ export class AlignmentGuides {
     return best;
   }
 
-  private show(edges: Segment[], target: Pixel): void {
-    const span = this.guideLength();
+  private show(edges: Segment[], target: Ground, frame: Frame): void {
+    const span = this.guideLength(frame);
     const lines: Position[][] = [];
     for (const edge of edges) {
       const stretched = extend(edge, span);
       if (stretched) {
-        lines.push([this.toLngLat(stretched[0]), this.toLngLat(stretched[1])]);
+        lines.push([
+          toPosition(stretched[0], frame),
+          toPosition(stretched[1], frame),
+        ]);
       }
     }
     this.draw(lines);
-    this.publishSnapping(this.toLngLat(target));
+    this.publishSnapping(toPosition(target, frame));
   }
 
-  /** Половина диагонали окна: направляющая обязана дотянуться до краёв. */
-  private guideLength(): number {
+  /** Длина направляющей в метрах: она обязана дотянуться до краёв окна. */
+  private guideLength(frame: Frame): number {
     const canvas = this.map!.getCanvas();
-    return Math.hypot(canvas.clientWidth, canvas.clientHeight);
+    const corner = this.map!.unproject([canvas.clientWidth, canvas.clientHeight]);
+    const far = toGround([corner.lng, corner.lat], frame);
+    return Math.hypot(far.x, far.y) * 2;
   }
 
   /** Рёбра уже нарисованных объектов — то, что продолжают направляющие. */
@@ -208,16 +229,6 @@ export class AlignmentGuides {
       }
     }
     return list;
-  }
-
-  private toPixel(position: Position): Pixel {
-    const point = this.map!.project([position[0], position[1]]);
-    return { x: point.x, y: point.y };
-  }
-
-  private toLngLat(pixel: Pixel): Position {
-    const lngLat = this.map!.unproject([pixel.x, pixel.y]);
-    return [lngLat.lng, lngLat.lat];
   }
 
   private ensureLayer(): void {

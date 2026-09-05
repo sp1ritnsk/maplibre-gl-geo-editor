@@ -1,16 +1,13 @@
 import type { Position } from "geojson";
 import type { Map as MapLibreMap, MapMouseEvent } from "maplibre-gl";
 
+import { frameAt, type Ground, toGround, toPosition } from "../utils/groundPlane";
+
 export interface AngleSnappingOptions {
   /** Angle step in degrees. Default: 45 */
   stepDegrees?: number;
   /** Key of the geoman custom snapping section this helper owns. */
   sectionKey?: string;
-}
-
-interface Pixel {
-  x: number;
-  y: number;
 }
 
 /**
@@ -127,18 +124,21 @@ export class AngleSnapping {
       return;
     }
 
-    const from = this.toPixel(side[0]);
-    const anchor = this.toPixel(side[1]);
-    const cursor = { x: event.point.x, y: event.point.y };
-    const locked = this.lockAngle(from, anchor, cursor);
+    // Углы меряются на земле, а не на экране: под наклонённой камерой экран —
+    // перспектива, и 45° в картинке не 45° на плане.
+    const frame = frameAt(side[0]);
+    const locked = this.lockAngle(
+      toGround(side[0], frame),
+      toGround(side[1], frame),
+      toGround([event.lngLat.lng, event.lngLat.lat], frame),
+    );
     if (!locked) {
       this.lockedPosition = null;
       this.clearSnapping();
       return;
     }
 
-    const lngLat = this.map.unproject([locked.x, locked.y]);
-    this.lockedPosition = [lngLat.lng, lngLat.lat];
+    this.lockedPosition = toPosition(locked, frame);
     this.publishSnapping(this.lockedPosition);
   }
 
@@ -148,7 +148,7 @@ export class AngleSnapping {
    * changes. A degenerate previous side sets no direction, and guessing one is
    * worse than leaving the cursor alone.
    */
-  private lockAngle(from: Pixel, anchor: Pixel, cursor: Pixel): Pixel | null {
+  private lockAngle(from: Ground, anchor: Ground, cursor: Ground): Ground | null {
     const length = Math.hypot(cursor.x - anchor.x, cursor.y - anchor.y);
     const reference = Math.hypot(anchor.x - from.x, anchor.y - from.y);
     if (length === 0 || reference === 0) return null;
@@ -161,11 +161,6 @@ export class AngleSnapping {
       x: anchor.x + length * Math.cos(snapped),
       y: anchor.y + length * Math.sin(snapped),
     };
-  }
-
-  private toPixel(position: Position): Pixel {
-    const point = this.map!.project([position[0], position[1]]);
-    return { x: point.x, y: point.y };
   }
 
   private publishSnapping(position: Position): void {

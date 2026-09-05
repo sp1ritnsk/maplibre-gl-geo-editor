@@ -1,7 +1,8 @@
 import type { Feature, Polygon, Position } from "geojson";
 import type { GeoJSONSource, Map as MapLibreMap, MapMouseEvent } from "maplibre-gl";
 
-import type { Pixel, Segment } from "../utils/guideGeometry";
+import type { Segment } from "../utils/guideGeometry";
+import { frameAt, toGround, toPosition } from "../utils/groundPlane";
 import { angledRectangleCorners } from "../utils/rectangleGeometry";
 
 export interface AngledRectangleResult {
@@ -134,11 +135,22 @@ export class AngledRectangleFeature {
     });
   }
 
+  /**
+   * Corners on the ground, not on the screen.
+   *
+   * Building the shape in pixels made it a rectangle in the picture and a
+   * parallelogram on the map as soon as the camera was pitched. The plane is
+   * anchored at the base edge, so it does not move when the camera does.
+   */
   private cornersFor(position: Position): Position[] | null {
-    if (!this.map || this.base.length < 2) return null;
-    const edge: Segment = [this.toPixel(this.base[0]), this.toPixel(this.base[1])];
-    const corners = angledRectangleCorners(edge, this.toPixel(position));
-    return corners ? corners.map((corner) => this.toLngLat(corner)) : null;
+    if (this.base.length < 2) return null;
+    const frame = frameAt(this.base[0]);
+    const edge: Segment = [
+      toGround(this.base[0], frame),
+      toGround(this.base[1], frame),
+    ];
+    const corners = angledRectangleCorners(edge, toGround(position, frame));
+    return corners ? corners.map((corner) => toPosition(corner, frame)) : null;
   }
 
   /**
@@ -171,16 +183,6 @@ export class AngledRectangleFeature {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     store.forEach((item: any) => list.push(item));
     return list;
-  }
-
-  private toPixel(position: Position): Pixel {
-    const point = this.map!.project([position[0], position[1]]);
-    return { x: point.x, y: point.y };
-  }
-
-  private toLngLat(pixel: Pixel): Position {
-    const lngLat = this.map!.unproject([pixel.x, pixel.y]);
-    return [lngLat.lng, lngLat.lat];
   }
 
   private ensureLayers(): void {
