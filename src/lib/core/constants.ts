@@ -118,6 +118,9 @@ export const DEFAULT_OPTIONS: GeoEditorOptionsRequired = {
  */
 export const CSS_PREFIX = "geo-editor";
 
+/** How long loadGeoJson waits for geoman before importing anyway. */
+export const LOAD_READY_TIMEOUT_MS = 3000;
+
 /**
  * Source and layer IDs used by the plugin
  */

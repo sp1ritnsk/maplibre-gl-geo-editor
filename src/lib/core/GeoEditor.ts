@@ -56,6 +56,7 @@ import type { CommandContext } from "./commands";
 import {
   DEFAULT_OPTIONS,
   CSS_PREFIX,
+  LOAD_READY_TIMEOUT_MS,
   ADVANCED_EDIT_MODES,
   INTERNAL_IDS,
 } from "./constants";
@@ -3791,7 +3792,16 @@ export class GeoEditor implements IControl {
       typeof geoman.waitForGeomanLoaded === "function"
     ) {
       try {
-        await geoman.waitForGeomanLoaded();
+        // Bounded: in some geoman builds this promise never settles, and an
+        // unbounded await turned loadGeoJson into a call that never returns.
+        // Everything after it — including the caller's own work — stopped
+        // silently, with nothing in the console to show for it.
+        await Promise.race([
+          geoman.waitForGeomanLoaded(),
+          new Promise((resolve) =>
+            setTimeout(resolve, LOAD_READY_TIMEOUT_MS),
+          ),
+        ]);
       } catch {
         /* best effort; the import below will surface a real failure */
       }
