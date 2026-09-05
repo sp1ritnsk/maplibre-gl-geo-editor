@@ -4577,6 +4577,15 @@ export class GeoEditor implements IControl {
         }
         this.lastEditedFeature = eventFeature;
         this.logSelectedFeatureCollection("edited", eventFeature);
+        // Notify the host application. Dragging a feature and editing its
+        // vertices end here and nowhere else: without this call the change
+        // stays inside the editor, and an app that persists geometry never
+        // learns the feature moved. Scaling, rotating and multi-drag have
+        // their own callback sites; these two had none.
+        this.options.onFeatureEdit?.(
+          eventFeature,
+          this.pendingEditFeature ?? eventFeature,
+        );
         // Record edit operation in history
         if (this.pendingEditFeature) {
           if (topologyEdits.length > 0) {
