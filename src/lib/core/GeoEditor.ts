@@ -4152,15 +4152,20 @@ export class GeoEditor implements IControl {
     try {
       await settleWithin(this.geoman.features.deleteAll());
     } catch {
-      // Fallback: delete features one by one
-      this.geoman.features.forEach((fd) => {
-        try {
-          fd.delete();
-        } catch {
-          /* ignore */
-        }
-      });
+      /* handled by the sweep below */
     }
+    // deleteAll() is raced against a timeout, and a timeout resolves as
+    // quietly as success does. Import on top of a store that was not actually
+    // emptied leaves the old shapes next to the new ones — a plan showing its
+    // outline twice, one where it was and one where it was dragged. So the
+    // store is swept before anything is added to it.
+    this.geoman.features.forEach((fd) => {
+      try {
+        fd.delete();
+      } catch {
+        /* ignore */
+      }
+    });
     this.clearSelection();
 
     // Normalize to FeatureCollection
