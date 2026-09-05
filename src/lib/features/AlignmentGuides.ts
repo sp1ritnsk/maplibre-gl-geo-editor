@@ -1,6 +1,17 @@
 import type { Position } from "geojson";
 import type { GeoJSONSource, Map as MapLibreMap, MapMouseEvent } from "maplibre-gl";
 
+import {
+  distance,
+  distanceToLine,
+  extend,
+  footOnLine,
+  lineIntersection,
+  midpoint,
+  type Pixel,
+  type Segment,
+} from "../utils/guideGeometry";
+
 export interface AlignmentGuidesOptions {
   /** How close in pixels counts as aligned. Default: 8 */
   tolerance?: number;
@@ -12,11 +23,6 @@ export interface AlignmentGuidesOptions {
 
 const SOURCE_ID = "geo-editor-alignment-guides";
 const LAYER_ID = "geo-editor-alignment-guides-line";
-
-interface Pixel {
-  x: number;
-  y: number;
-}
 
 /**
  * Alignment guides.
@@ -37,12 +43,15 @@ export class AlignmentGuides {
   private geoman: any = null;
   private enabled = false;
   private readonly tolerance: number;
+  /** Пересечение продолжений ловится шире: попасть в точку труднее, чем в линию. */
+  private readonly crossingTolerance: number;
   private readonly sectionKey: string;
   private readonly color: string;
   private handleMouseMove: ((e: MapMouseEvent) => void) | null = null;
 
   constructor(options: AlignmentGuidesOptions = {}) {
     this.tolerance = options.tolerance ?? 8;
+    this.crossingTolerance = (options.tolerance ?? 8) * 2;
     this.sectionKey = options.sectionKey ?? "geo-editor-guides";
     this.color = options.color ?? "#e11d48";
   }
@@ -87,82 +96,118 @@ export class AlignmentGuides {
     this.geoman = null;
   }
 
+  /**
+   * Что показать и куда притянуть под курсором.
+   *
+   * Разбор идёт от точного к приблизительному: пересечение двух продолжений
+   * точнее середины ребра, середина точнее самого продолжения. Экранные
+   * горизонталь и вертикаль сюда не входят намеренно — через какую-нибудь
+   * вершину они проходят почти всегда, и направляющая, которая горит
+   * постоянно, не говорит ничего.
+   */
   private update(event: MapMouseEvent): void {
     if (!this.map) return;
     const cursor: Pixel = { x: event.point.x, y: event.point.y };
+    const edges = this.edges().map(
+      (edge): Segment => [this.toPixel(edge[0]), this.toPixel(edge[1])],
+    );
 
-    let alignedX: { vertex: Position; pixel: Pixel } | null = null;
-    let alignedY: { vertex: Position; pixel: Pixel } | null = null;
-    let bestX = this.tolerance;
-    let bestY = this.tolerance;
+    // Рёбра, продолжение которых проходит под курсором.
+    const engaged = edges
+      .map((edge) => ({ edge, gap: distanceToLine(cursor, edge) }))
+      .filter(
+        (item): item is { edge: Segment; gap: number } =>
+          item.gap !== null && item.gap <= this.tolerance,
+      )
+      .sort((left, right) => left.gap - right.gap)
+      .slice(0, 2);
 
-    for (const vertex of this.vertices()) {
-      const pixel = this.toPixel(vertex);
-      const dx = Math.abs(pixel.x - cursor.x);
-      const dy = Math.abs(pixel.y - cursor.y);
-      if (dx <= bestX) {
-        bestX = dx;
-        alignedX = { vertex, pixel };
-      }
-      if (dy <= bestY) {
-        bestY = dy;
-        alignedY = { vertex, pixel };
+    if (engaged.length >= 2) {
+      const crossing = lineIntersection(engaged[0].edge, engaged[1].edge);
+      if (crossing && distance(crossing, cursor) <= this.crossingTolerance) {
+        this.show([engaged[0].edge, engaged[1].edge], crossing);
+        return;
       }
     }
 
-    if (!alignedX && !alignedY) {
-      this.draw([]);
-      this.clearSnapping();
+    const middle = this.nearestMidpoint(cursor, edges);
+    if (middle) {
+      this.show([middle.edge], middle.point);
       return;
     }
 
-    // Совпало по обеим осям — цель стоит на пересечении направляющих.
-    const locked: Pixel = {
-      x: alignedX ? alignedX.pixel.x : cursor.x,
-      y: alignedY ? alignedY.pixel.y : cursor.y,
-    };
-    const lines: Position[][] = [];
-    if (alignedX) {
-      lines.push(this.verticalGuide(alignedX.pixel.x));
+    if (engaged.length >= 1) {
+      const foot = footOnLine(cursor, engaged[0].edge);
+      if (foot) {
+        this.show([engaged[0].edge], foot);
+        return;
+      }
     }
-    if (alignedY) {
-      lines.push(this.horizontalGuide(alignedY.pixel.y));
-    }
-    this.draw(lines);
 
-    const lngLat = this.map.unproject([locked.x, locked.y]);
-    this.publishSnapping([lngLat.lng, lngLat.lat]);
+    this.draw([]);
+    this.clearSnapping();
   }
 
-  /** Вершины уже нарисованных объектов — то, с чем выравниваются. */
-  private vertices(): Position[] {
+  /** Середина ребра — по ней ставят стеллаж по центру прохода. */
+  private nearestMidpoint(
+    cursor: Pixel,
+    edges: Segment[],
+  ): { edge: Segment; point: Pixel } | null {
+    let best: { edge: Segment; point: Pixel } | null = null;
+    let bestGap = this.tolerance;
+    for (const edge of edges) {
+      const point = midpoint(edge);
+      const gap = distance(cursor, point);
+      if (gap <= bestGap) {
+        bestGap = gap;
+        best = { edge, point };
+      }
+    }
+    return best;
+  }
+
+  private show(edges: Segment[], target: Pixel): void {
+    const span = this.guideLength();
+    const lines: Position[][] = [];
+    for (const edge of edges) {
+      const stretched = extend(edge, span);
+      if (stretched) {
+        lines.push([this.toLngLat(stretched[0]), this.toLngLat(stretched[1])]);
+      }
+    }
+    this.draw(lines);
+    this.publishSnapping(this.toLngLat(target));
+  }
+
+  /** Половина диагонали окна: направляющая обязана дотянуться до краёв. */
+  private guideLength(): number {
+    const canvas = this.map!.getCanvas();
+    return Math.hypot(canvas.clientWidth, canvas.clientHeight);
+  }
+
+  /** Рёбра уже нарисованных объектов — то, что продолжают направляющие. */
+  private edges(): Array<[Position, Position]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const features = this.geoman?.features;
     if (!features || typeof features.getAll !== "function") return [];
     const collection = features.getAll();
-    const list: Position[] = [];
+    const list: Array<[Position, Position]> = [];
+    const addRing = (ring: Position[], closed: boolean): void => {
+      const count = closed ? ring.length - 1 : ring.length - 1;
+      for (let index = 0; index < count; index += 1) {
+        list.push([ring[index], ring[index + 1]]);
+      }
+    };
     for (const feature of collection?.features ?? []) {
       const geometry = feature?.geometry;
       if (!geometry) continue;
       if (geometry.type === "Polygon") {
-        for (const ring of geometry.coordinates) list.push(...ring);
+        for (const ring of geometry.coordinates) addRing(ring, true);
       } else if (geometry.type === "LineString") {
-        list.push(...geometry.coordinates);
-      } else if (geometry.type === "Point") {
-        list.push(geometry.coordinates);
+        addRing(geometry.coordinates, false);
       }
     }
     return list;
-  }
-
-  private verticalGuide(x: number): Position[] {
-    const height = this.map!.getCanvas().clientHeight;
-    return [this.toLngLat({ x, y: 0 }), this.toLngLat({ x, y: height })];
-  }
-
-  private horizontalGuide(y: number): Position[] {
-    const width = this.map!.getCanvas().clientWidth;
-    return [this.toLngLat({ x: 0, y }), this.toLngLat({ x: width, y })];
   }
 
   private toPixel(position: Position): Pixel {
