@@ -76,6 +76,7 @@ import {
 } from "../features";
 import { getPolygonFeatures } from "../utils/selectionUtils";
 import { principalDirection, snapRotation } from "../utils/rotationSnapping";
+import { canStand } from "../utils/placement";
 
 /**
  * How far off parallel, in degrees, still snaps onto a neighbouring edge.
@@ -83,6 +84,11 @@ import { principalDirection, snapRotation } from "../utils/rotationSnapping";
  * between survives.
  */
 const ROTATE_SNAP_TOLERANCE_DEGREES = 4;
+
+/** A copy that survives geoman's own objects, which structuredClone chokes on. */
+function cloneGeometry(geometry: Feature["geometry"]): Feature["geometry"] {
+  return JSON.parse(JSON.stringify(geometry)) as Feature["geometry"];
+}
 /** Half-length of the hint drawn along the direction that was matched. */
 const ROTATE_GUIDE_METRES = 40;
 import { isPolygon, isLine } from "../utils/geometryUtils";
@@ -158,6 +164,23 @@ export class GeoEditor implements IControl {
   private rotateDragPivot: Position | null = null;
   private rotateDragBearing = 0;
   private rotateDragOwn = 0;
+  private placementConstraint = false;
+  private placementBoundary: Feature | null = null;
+  private lastValidGeometry: Feature["geometry"] | null = null;
+  /**
+   * Was the object standing legally when the edit began?
+   *
+   * A plan drawn before the constraint existed, or imported from elsewhere,
+   * may well have a shelf sitting on a wall. Holding such an object at its
+   * last legal spot would freeze it where it is — there is no legal spot to
+   * hold it at — and the one thing left to do with it, moving it out, would
+   * become impossible. So a bad start is left free.
+   */
+  private placementWasValid = true;
+  private rotateStartedLegally = true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private editingData: any = null;
+  private boundPlacementMove: ((e: MapMouseEvent) => void) | null = null;
   private boundRotateContextMenu: ((e: MapMouseEvent) => void) | null = null;
 
   // Selection mode state
@@ -315,6 +338,7 @@ export class GeoEditor implements IControl {
     this.setupScaleHandler();
     this.setupRotateHandler();
     this.setupRotateDragHandler();
+    this.setupPlacementHandler();
     this.setupMultiDragHandler();
     this.setupDrawFinishHandlers();
 
@@ -346,6 +370,7 @@ export class GeoEditor implements IControl {
     this.removeScaleHandler();
     this.removeRotateHandler();
     this.removeRotateDragHandler();
+    this.removePlacementHandler();
     this.removeMultiDragHandler();
     this.removeDrawFinishHandlers();
     this.removeVertexMarkerStyleListener();
@@ -1254,6 +1279,103 @@ export class GeoEditor implements IControl {
     ];
   }
 
+  /**
+   * Keep objects inside the room and off each other while they are moved.
+   *
+   * The boundary is passed in because a host may draw the room without giving
+   * it to the editor — ours does, so that a click inside the hall lands on a
+   * shelf and not on the floor.
+   */
+  setPlacementConstraint(options: {
+    enabled: boolean;
+    boundary?: Feature | null;
+  }): void {
+    this.placementConstraint = options.enabled;
+    if (options.boundary !== undefined) {
+      this.placementBoundary = options.boundary;
+    }
+  }
+
+  /** Everything on the plan except the one being moved. */
+  private neighboursOf(featureId: string | null): Feature[] {
+    if (!this.geoman) return [];
+    const list: Feature[] = [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this.geoman.features.forEach((data: any) => {
+        const feature = this.getGeomanFeature(data);
+        if (!feature) return;
+        if (featureId !== null && this.getGeomanIdFromFeature(feature) === featureId) return;
+        list.push(feature);
+      });
+    } catch {
+      return [];
+    }
+    return list;
+  }
+
+  /** May this shape stand where it is now? */
+  private mayStand(feature: Feature): boolean {
+    if (!this.placementConstraint) return true;
+    return canStand(
+      feature,
+      this.placementBoundary,
+      this.neighboursOf(this.getGeomanIdFromFeature(feature)),
+    );
+  }
+
+
+  /**
+   * Remembers the last spot the object was allowed to occupy.
+   *
+   * Only remembers — putting it back on every illegal frame does not work.
+   * Geoman recomputes the position from where the drag began, not from where
+   * the shape currently is, so a correction is overwritten by the next frame
+   * and the object still ends up under the cursor. The place to hold it is
+   * therefore the end of the gesture, not the middle of it.
+   */
+  private setupPlacementHandler(): void {
+    this.boundPlacementMove = () => {
+      if (!this.placementConstraint || !this.editingData || !this.placementWasValid) return;
+      const feature = this.getGeomanFeature(this.editingData);
+      if (!feature || !this.mayStand(feature)) return;
+      this.lastValidGeometry = cloneGeometry(feature.geometry);
+    };
+    this.map.on("mousemove", this.boundPlacementMove);
+  }
+
+  /**
+   * Puts an object back where it was last allowed to stand.
+   *
+   * Called when the hand lets go: the shape follows the cursor through the
+   * wall while the button is down and settles at the last legal spot when it
+   * is released. Returns the geometry that ended up being used.
+   */
+  private holdAtLastValid(feature: Feature): Feature {
+    if (
+      !this.placementConstraint ||
+      !this.placementWasValid ||
+      !this.lastValidGeometry ||
+      this.mayStand(feature)
+    ) {
+      return feature;
+    }
+    const restore = cloneGeometry(this.lastValidGeometry);
+    if (this.editingData?.updateGeometry) {
+      this.editingData.updateGeometry(restore);
+    } else {
+      this.editingData?.updateGeoJsonGeometry?.(restore);
+    }
+    return { ...feature, geometry: restore };
+  }
+
+  private removePlacementHandler(): void {
+    if (this.boundPlacementMove) {
+      this.map.off("mousemove", this.boundPlacementMove);
+      this.boundPlacementMove = null;
+    }
+  }
+
   private setupRotateDragHandler(): void {
     this.boundRotateDragDown = (e: MapMouseEvent) => {
       if (this.state.activeEditMode !== "rotate") return;
@@ -1286,6 +1408,7 @@ export class GeoEditor implements IControl {
         e.lngLat.lat,
       ]);
       this.rotateDragOwn = principalDirection(ring) ?? 0;
+      this.rotateStartedLegally = this.mayStand(feature);
       this.isRotatingByDrag = true;
       this.alignmentGuides.setSuspended(true);
       this.disableScaleDragPan();
@@ -1315,6 +1438,9 @@ export class GeoEditor implements IControl {
         snapped.angle,
         pivot,
       );
+      // A turn that would put the object through a wall is simply not applied;
+      // the object holds its last legal angle while the cursor keeps going.
+      if (this.rotateStartedLegally && !this.mayStand(rotated)) return;
       this.applyRotatedFeature(rotated);
       this.alignmentGuides.showLines(
         snapped.target === null
@@ -4766,10 +4892,26 @@ export class GeoEditor implements IControl {
       // Handle feature edit start - store pre-edit state
       if (eventAction === "feature_edit_start" && eventFeature) {
         this.pendingEditFeature = turf.clone(eventFeature);
+        // Guarded: this runs inside geoman's own event dispatch, and anything
+        // thrown here tears down the drag that is only just beginning.
+        try {
+          // The selection is the reliable handle on the shape being edited:
+          // the feature carried by geoman's own event does not always match
+          // anything in the store by id or by geometry.
+          this.editingData =
+            this.state.selectedFeatures[0]?.geomanData ??
+            this.findGeomanDataForFeature(eventFeature);
+          this.lastValidGeometry = cloneGeometry(eventFeature.geometry);
+          this.placementWasValid = this.mayStand(eventFeature);
+        } catch {
+          this.editingData = null;
+          this.placementWasValid = false;
+        }
       }
 
       // Handle feature edit end
       if (eventAction === "feature_edit_end" && eventFeature) {
+        const settled = this.holdAtLastValid(eventFeature);
         let topologyEdits: Array<{
           oldFeature: Feature;
           newFeature: Feature;
@@ -4777,30 +4919,32 @@ export class GeoEditor implements IControl {
         if (this.pendingEditFeature) {
           topologyEdits = this.applyTopologyToEditedFeature(
             this.pendingEditFeature,
-            eventFeature,
+            settled,
           );
         }
-        this.lastEditedFeature = eventFeature;
-        this.logSelectedFeatureCollection("edited", eventFeature);
+        this.editingData = null;
+        this.lastValidGeometry = null;
+        this.lastEditedFeature = settled;
+        this.logSelectedFeatureCollection("edited", settled);
         // Notify the host application. Dragging a feature and editing its
         // vertices end here and nowhere else: without this call the change
         // stays inside the editor, and an app that persists geometry never
         // learns the feature moved. Scaling, rotating and multi-drag have
         // their own callback sites; these two had none.
         this.options.onFeatureEdit?.(
-          eventFeature,
-          this.pendingEditFeature ?? eventFeature,
+          settled,
+          this.pendingEditFeature ?? settled,
         );
         // Record edit operation in history
         if (this.pendingEditFeature) {
           if (topologyEdits.length > 0) {
             this.recordTopologyEditOperation(
               this.pendingEditFeature,
-              eventFeature,
+              settled,
               topologyEdits,
             );
           } else {
-            this.recordEditOperation(this.pendingEditFeature, eventFeature);
+            this.recordEditOperation(this.pendingEditFeature, settled);
           }
           this.pendingEditFeature = null;
         }
