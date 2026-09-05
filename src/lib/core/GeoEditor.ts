@@ -85,6 +85,22 @@ import { canStand } from "../utils/placement";
  */
 const ROTATE_SNAP_TOLERANCE_DEGREES = 4;
 
+/** Geoman's own record of a shape, if that is what the event handed over. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function asGeomanData(candidate: unknown): any {
+  if (!candidate || typeof candidate !== "object") return null;
+  const data = candidate as {
+    updateGeometry?: unknown;
+    updateGeoJsonGeometry?: unknown;
+    getGeoJson?: unknown;
+  };
+  const usable =
+    typeof data.updateGeometry === "function" ||
+    typeof data.updateGeoJsonGeometry === "function" ||
+    typeof data.getGeoJson === "function";
+  return usable ? data : null;
+}
+
 /** A copy that survives geoman's own objects, which structuredClone chokes on. */
 function cloneGeometry(geometry: Feature["geometry"]): Feature["geometry"] {
   return JSON.parse(JSON.stringify(geometry)) as Feature["geometry"];
@@ -4895,10 +4911,12 @@ export class GeoEditor implements IControl {
         // Guarded: this runs inside geoman's own event dispatch, and anything
         // thrown here tears down the drag that is only just beginning.
         try {
-          // The selection is the reliable handle on the shape being edited:
-          // the feature carried by geoman's own event does not always match
-          // anything in the store by id or by geometry.
+          // The event usually carries geoman's own record of the shape, and
+          // that is the only handle available when the shape is dragged
+          // without being selected first — which is the ordinary case for the
+          // drag tool. The selection and a search by id are fallbacks.
           this.editingData =
+            asGeomanData(event.feature) ??
             this.state.selectedFeatures[0]?.geomanData ??
             this.findGeomanDataForFeature(eventFeature);
           this.lastValidGeometry = cloneGeometry(eventFeature.geometry);
