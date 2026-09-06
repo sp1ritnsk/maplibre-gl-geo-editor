@@ -1898,7 +1898,7 @@ export class GeoEditor implements IControl {
       if (this.drawRequestId !== requestId) return;
 
       // A new shape starts with no previous side to measure angles from.
-      this.angleSnapping.reset();
+      this.angleSnapping.setDrawing(true);
       // Freehand uses our own implementation (not available in Geoman free) and
       // attaches its own canvas handlers, so it is sequenced after the teardown
       // for the same reason as the Geoman draw modes.
@@ -2099,6 +2099,8 @@ export class GeoEditor implements IControl {
 
     // Disable advanced modes
     this.endDragGuides();
+    this.angleSnapping.setDrawing(false);
+    this.angleSnapping.endVertexEdit();
     this.scaleFeature.cancelScale();
     this.closeRotatePopup();
     this.lassoFeature.disable();
@@ -5140,6 +5142,11 @@ export class GeoEditor implements IControl {
           if (eventName === "gm:dragstart" && this.editingData) {
             this.beginDragGuides(this.editingData);
           }
+          // Vertex editing gets the same angle lock as drawing: the side
+          // arriving at the vertex is measured from the side before it.
+          if (eventName === "gm:editstart" && this.editingData) {
+            this.angleSnapping.beginVertexEdit(this.editingData);
+          }
         } catch {
           this.editingData = null;
           this.placementWasValid = false;
@@ -5150,6 +5157,7 @@ export class GeoEditor implements IControl {
       if (eventAction === "feature_edit_end" && eventFeature) {
         const dragged = eventName === "gm:dragend";
         this.endDragGuides();
+        this.angleSnapping.endVertexEdit();
         const settled = this.holdAtLastValid(
           dragged ? this.alignOnRelease(eventFeature) : eventFeature,
         );

@@ -1,7 +1,48 @@
-import type { Position } from "geojson";
+import type { Feature, Position } from "geojson";
 import type { Map as MapLibreMap, MapMouseEvent } from "maplibre-gl";
 
+import { cornerAt, lockedVertexPositions } from "../utils/angleLock";
 import { frameAt, type Ground, toGround, toPosition } from "../utils/groundPlane";
+
+/** Geoman's record of a shape, as far as this helper reaches into it. */
+interface EditedShape {
+  getGeoJson?: () => Feature;
+  geoJson?: Feature;
+}
+
+/** The path a vertex belongs to: a ring is closed, a line is not. */
+interface VertexPath {
+  points: Position[];
+  closed: boolean;
+}
+
+function shapeOf(shape: EditedShape): Feature | null {
+  if (typeof shape.getGeoJson === "function") {
+    try {
+      return shape.getGeoJson();
+    } catch {
+      return null;
+    }
+  }
+  return shape.geoJson ?? null;
+}
+
+/** Distinct vertices of a shape: a ring without its repeated last point. */
+function pathOf(feature: Feature): VertexPath | null {
+  const geometry = feature.geometry;
+  if (geometry.type === "Polygon") {
+    const ring = geometry.coordinates[0] ?? [];
+    return ring.length < 2
+      ? null
+      : { points: ring.slice(0, ring.length - 1), closed: true };
+  }
+  if (geometry.type === "LineString") {
+    return geometry.coordinates.length < 2
+      ? null
+      : { points: geometry.coordinates, closed: false };
+  }
+  return null;
+}
 
 export interface AngleSnappingOptions {
   /** Angle step in degrees. Default: 45 */
@@ -22,10 +63,17 @@ export interface AngleSnappingOptions {
  * corners square. The first side is drawn freely — it sets the orientation,
  * and every following side is measured against it.
  *
+ * The same lock applies to a shape that already exists. Dragging one of its
+ * vertices measures each of the two sides meeting there from the side beyond
+ * it, so a room traced roughly square can be squared up afterwards — by hand
+ * a corner never lands on the right angle exactly. See `utils/angleLock`.
+ *
  * Implementation note: geoman owns the cursor, so this helper does not move it.
- * It publishes the angle-locked position as a custom snapping coordinate and
- * lets geoman's own snapping pull the cursor there when it is within tolerance.
- * That keeps one snapping pipeline instead of two fighting each other.
+ * It publishes the angle-locked positions as custom snapping coordinates and
+ * lets geoman's own snapping pull the cursor onto the nearest one when it is
+ * within tolerance. That keeps one snapping pipeline instead of two fighting
+ * each other — and it is the same pipeline that moves a vertex under the hand,
+ * so the lock reaches editing without a second mechanism.
  */
 export class AngleSnapping {
   private map: MapLibreMap | null = null;
@@ -36,6 +84,13 @@ export class AngleSnapping {
   private readonly sectionKey: string;
   private vertices: Position[] = [];
   private lockedPosition: Position | null = null;
+  /** True while a draw tool is armed: only then do clicks lay down vertices. */
+  private drawing = false;
+  /** The shape whose vertex is being dragged, while that is happening. */
+  private edited: EditedShape | null = null;
+  /** Which vertex of it — fixed for the length of the drag. */
+  private editIndex: number | null = null;
+  private lastCursor: Position | null = null;
 
   private handleClick: ((e: MapMouseEvent) => void) | null = null;
   private handleMouseMove: ((e: MapMouseEvent) => void) | null = null;
@@ -89,8 +144,39 @@ export class AngleSnapping {
     this.clearSnapping();
   }
 
+  /**
+   * Whether a draw tool is armed.
+   *
+   * Vertices are only laid down while one is: a click anywhere on the map
+   * used to count as a corner of the shape being drawn, even when nothing was
+   * being drawn, and the lock published from those stray points pulled at
+   * everything else the cursor did afterwards.
+   */
+  setDrawing(drawing: boolean): void {
+    this.drawing = drawing;
+    if (!drawing) this.reset();
+  }
+
+  /**
+   * Follow a vertex that is being dragged instead of a shape being drawn.
+   *
+   * @param shape - Geoman's record of the shape the vertex belongs to; its
+   *   geometry is read again on every move, since that is what changes.
+   */
+  beginVertexEdit(shape: EditedShape): void {
+    this.edited = shape;
+    this.editIndex = this.vertexUnderCursor(shape, this.lastCursor);
+  }
+
+  endVertexEdit(): void {
+    this.edited = null;
+    this.editIndex = null;
+    this.clearSnapping();
+  }
+
   destroy(): void {
     this.disable();
+    this.endVertexEdit();
     this.map = null;
     this.geoman = null;
   }
@@ -104,9 +190,65 @@ export class AngleSnapping {
    * following angle would inherit the error.
    */
   private recordVertex(event: MapMouseEvent): void {
+    if (!this.drawing) return;
     const raw: Position = [event.lngLat.lng, event.lngLat.lat];
     this.vertices.push(this.lockedPosition ?? raw);
     this.lockedPosition = null;
+  }
+
+  /**
+   * Which vertex of the shape the hand has hold of.
+   *
+   * Geoman does say which marker it captured, but only through internals; the
+   * dragged vertex is also simply the one under the cursor when the drag
+   * begins, and that holds for every geoman build.
+   */
+  private vertexUnderCursor(shape: EditedShape, cursor: Position | null): number | null {
+    const feature = shapeOf(shape);
+    const path = feature === null ? null : pathOf(feature);
+    if (path === null || cursor === null) return null;
+    const frame = frameAt(cursor);
+    const target = toGround(cursor, frame);
+    let best: number | null = null;
+    let nearest = Number.POSITIVE_INFINITY;
+    path.points.forEach((point, index) => {
+      const ground = toGround(point, frame);
+      const gap = Math.hypot(ground.x - target.x, ground.y - target.y);
+      if (gap < nearest) {
+        nearest = gap;
+        best = index;
+      }
+    });
+    return best;
+  }
+
+  /** Where the dragged vertex may land with its sides on whole steps. */
+  private publishVertexLock(event: MapMouseEvent): void {
+    const shape = this.edited;
+    if (shape === null) return;
+    const cursorPosition: Position = [event.lngLat.lng, event.lngLat.lat];
+    this.editIndex ??= this.vertexUnderCursor(shape, cursorPosition);
+    const feature = shapeOf(shape);
+    const path = feature === null ? null : pathOf(feature);
+    if (path === null || this.editIndex === null || this.editIndex >= path.points.length) {
+      this.clearSnapping();
+      return;
+    }
+    const frame = frameAt(cursorPosition);
+    const positions = lockedVertexPositions(
+      cornerAt(
+        path.points.map((point) => toGround(point, frame)),
+        this.editIndex,
+        path.closed,
+      ),
+      toGround(cursorPosition, frame),
+      this.step,
+    );
+    if (positions.length === 0) {
+      this.clearSnapping();
+      return;
+    }
+    this.publishSnapping(positions.map((position) => toPosition(position, frame)));
   }
 
   private previousSide(): [Position, Position] | null {
@@ -117,8 +259,13 @@ export class AngleSnapping {
   }
 
   private publishLock(event: MapMouseEvent): void {
+    this.lastCursor = [event.lngLat.lng, event.lngLat.lat];
+    if (this.edited !== null) {
+      this.publishVertexLock(event);
+      return;
+    }
     const side = this.previousSide();
-    if (!side || !this.map) {
+    if (!side || !this.drawing || !this.map) {
       this.lockedPosition = null;
       this.clearSnapping();
       return;
@@ -139,7 +286,7 @@ export class AngleSnapping {
     }
 
     this.lockedPosition = toPosition(locked, frame);
-    this.publishSnapping(this.lockedPosition);
+    this.publishSnapping([this.lockedPosition]);
   }
 
   /**
@@ -163,13 +310,16 @@ export class AngleSnapping {
     };
   }
 
-  private publishSnapping(position: Position): void {
+  private publishSnapping(positions: Position[]): void {
     const helper = this.snappingHelper();
     if (!helper) return;
     try {
-      helper.setCustomSnappingCoordinates(this.sectionKey, [
-        [position[0], position[1]],
-      ]);
+      // More than one candidate is normal while a vertex is dragged: geoman
+      // pulls the cursor onto whichever of them is nearest on screen.
+      helper.setCustomSnappingCoordinates(
+        this.sectionKey,
+        positions.map((position) => [position[0], position[1]]),
+      );
     } catch {
       // Older geoman builds have no custom snapping section.
     }
