@@ -125,3 +125,45 @@ describe("cornerAt", () => {
     });
   });
 });
+
+describe("вогнутый угол Г-образного зала", () => {
+  /**
+   * Зал буквой «Г»; D — внутренний, вогнутый угол. Обход против часовой:
+   *
+   *   F(0,10) ── E(4,10)
+   *     │           │
+   *     │       D(4,4) ── C(10,4)
+   *     │                    │
+   *   A(0,0) ─────────── B(10,0)
+   */
+  const L_SHAPE = [at(0, 0), at(10, 0), at(10, 4), at(4, 4), at(4, 10), at(0, 10)];
+
+  it("считает стороны так же, как у выпуклого: вогнутость роли не играет", () => {
+    // D уведён из (4, 4) в (4.5, 3.6) — как его нарисовали бы от руки.
+    const crooked = [...L_SHAPE];
+    crooked[3] = at(4.5, 3.6);
+    const corner = cornerAt(crooked, 3, true);
+
+    // Сторона, приходящая в угол, меряется от южной стены здания (B→C),
+    // уходящая — от северной (F→E).
+    expect(corner.prevPrev).toEqual(crooked[1]);
+    expect(corner.prev).toEqual(crooked[2]);
+    expect(corner.next).toEqual(crooked[4]);
+    expect(corner.nextNext).toEqual(crooked[5]);
+  });
+
+  it("сводит вогнутый угол в прямой с обеих сторон", () => {
+    const crooked = [...L_SHAPE];
+    crooked[3] = at(4.5, 3.6);
+    const positions = lockedVertexPositions(cornerAt(crooked, 3, true), at(4.25, 3.85), STEP);
+
+    // Обе стороны: горизонталь через C и вертикаль через E.
+    expect(positions.some((p) => Math.abs(p.y - at(0, 4).y) < 1e-9)).toBe(true);
+    expect(positions.some((p) => Math.abs(p.x - at(4, 0).x) < 1e-9)).toBe(true);
+    // И сам угол — их пересечение, ровно (4, 4).
+    const corner = positions.find(
+      (p) => Math.abs(p.x - at(4, 0).x) < 1e-9 && Math.abs(p.y - at(0, 4).y) < 1e-9,
+    );
+    expect(corner).toBeDefined();
+  });
+});

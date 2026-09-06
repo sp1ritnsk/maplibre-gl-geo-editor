@@ -96,7 +96,7 @@ function harness() {
 }
 
 describe("угловой замок при правке вершины", () => {
-  it("предлагает прямой угол по обеим сторонам и их пересечение", () => {
+  it("у самого угла предлагает угол, а не его стороны", () => {
     const { snapping, move, published } = harness();
     const shape = room();
     // Курсор берёт угол (10, 10) и уводит его на 40 см наружу и вниз.
@@ -104,17 +104,26 @@ describe("угловой замок при правке вершины", () => {
     snapping.beginVertexEdit({ getGeoJson: () => shape });
     move(at(10.4, 9.6));
 
+    // Пересечение линий всегда дальше от курсора, чем каждая из них, и по
+    // правилу «кто ближе» проиграло бы. У угла предлагается только оно —
+    // иначе вершина садилась бы на одну сторону, а вторая оставалась кривой.
     const last = published[published.length - 1].map(metres);
-    // Перпендикуляр к южной стене — линия x = 10.
-    expect(last.some((p) => Math.abs(p.east - 10) < 0.01 && Math.abs(p.north - 9.6) < 0.01)).toBe(
-      true,
-    );
-    // Перпендикуляр к западной стене — линия y = 10.
-    expect(last.some((p) => Math.abs(p.east - 10.4) < 0.01 && Math.abs(p.north - 10) < 0.01)).toBe(
-      true,
-    );
-    // И сам угол, где обе стороны прямые.
-    expect(last.some((p) => Math.abs(p.east - 10) < 0.01 && Math.abs(p.north - 10) < 0.01)).toBe(
+    expect(last).toHaveLength(1);
+    expect(last[0].east).toBeCloseTo(10, 2);
+    expect(last[0].north).toBeCloseTo(10, 2);
+  });
+
+  it("поодаль от угла предлагает его стороны", () => {
+    const { snapping, move, published } = harness();
+    const shape = room();
+    move(at(10, 10));
+    snapping.beginVertexEdit({ getGeoJson: () => shape });
+    // Вдоль восточной стены, в пяти метрах от угла: сам угол уже далеко.
+    move(at(10.1, 5));
+
+    const last = published[published.length - 1].map(metres);
+    expect(last).toHaveLength(2);
+    expect(last.some((p) => Math.abs(p.east - 10) < 0.01 && Math.abs(p.north - 5) < 0.01)).toBe(
       true,
     );
   });
@@ -124,17 +133,17 @@ describe("угловой замок при правке вершины", () => {
     const shape = room();
     move(at(0, 0));
     snapping.beginVertexEdit({ getGeoJson: () => shape });
-    // Тащим угол (0, 0) через весь зал — вплотную к соседнему углу (10, 0).
-    move(at(9.6, -0.4));
+    // Тащим угол (0, 0) вдоль южной стены: ближайшая к курсору вершина здесь
+    // уже соседняя, (10, 0).
+    move(at(6, -0.35));
 
     const last = published[published.length - 1].map(metres);
-    // Стороны при взятой вершине дают диагональ от (10, 0) — курсор уже на ней.
-    expect(last.some((p) => Math.abs(p.east - 9.6) < 0.01 && Math.abs(p.north + 0.4) < 0.01)).toBe(
+    // Продолжение западной стены под 45° — сторона при взятой вершине.
+    expect(last.some((p) => Math.abs(p.east - 8.18) < 0.05 && Math.abs(p.north - 1.82) < 0.05)).toBe(
       true,
     );
-    // Если бы вершину переопределили по близости курсора, замок считался бы от
-    // сторон угла (10, 0) и предложил бы точку на южной стене.
-    expect(last.some((p) => Math.abs(p.east - 9.6) < 0.01 && Math.abs(p.north) < 0.01)).toBe(false);
+    // От сторон соседней вершины замок дал бы точку на восточной стене.
+    expect(last.some((p) => Math.abs(p.east - 10) < 0.05)).toBe(false);
   });
 
   it("отпускает вершину и перестаёт что-либо навязывать", () => {

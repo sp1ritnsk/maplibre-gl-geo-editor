@@ -282,13 +282,16 @@ export class AngleSnapping {
       this.draw([]);
       return;
     }
+    // Где две линии сходятся, угол становится прямым сразу с двух сторон — но
+    // само пересечение всегда дальше от курсора, чем каждая из линий по
+    // отдельности, и по правилу «кто ближе» не побеждает никогда. Поэтому у
+    // самого угла оно предлагается одно: рука вошла в допуск — вершина встаёт
+    // ровно в угол, а не на одну из его сторон.
     const crossing = lockedCrossing(locks);
-    const positions = locks.map((lock) => lock.position);
-    this.publishSnapping(
-      (crossing === null ? positions : [...positions, crossing]).map((position) =>
-        toPosition(position, frame),
-      ),
-    );
+    const corner =
+      crossing !== null && this.screenGap(event, crossing, frame) <= this.snapPixels();
+    const positions = corner && crossing !== null ? [crossing] : locks.map((lock) => lock.position);
+    this.publishSnapping(positions.map((position) => toPosition(position, frame)));
     this.drawLocks(locks, event, frame);
   }
 
