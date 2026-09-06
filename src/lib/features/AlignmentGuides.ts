@@ -354,7 +354,12 @@ export class AlignmentGuides {
    */
   setSuspended(suspended: boolean): void {
     this.suspended = suspended;
-    if (suspended) this.draw([]);
+    if (suspended) {
+      this.draw([]);
+      // Иначе последняя опубликованная точка продолжает притягивать курсор,
+      // хотя направляющие уже никто не показывает.
+      this.clearSnapping();
+    }
   }
 
   /**

@@ -337,6 +337,9 @@ export class GeoEditor implements IControl {
     this.angleSnapping.init(map, this.geoman);
     this.alignmentGuides.init(map, this.geoman);
     this.angledRectangle.init(map, this.geoman);
+    // The angle lock draws onto the guide layer: one place where hints live,
+    // and no second source or layer to keep in order with it.
+    this.angleSnapping.setGuideRenderer((lines) => this.alignmentGuides.showLines(lines));
     if (this.anglesEnabled) this.angleSnapping.enable();
 
     // Create container
@@ -2101,6 +2104,7 @@ export class GeoEditor implements IControl {
     this.endDragGuides();
     this.angleSnapping.setDrawing(false);
     this.angleSnapping.endVertexEdit();
+    this.alignmentGuides.setSuspended(false);
     this.scaleFeature.cancelScale();
     this.closeRotatePopup();
     this.lassoFeature.disable();
@@ -5143,9 +5147,12 @@ export class GeoEditor implements IControl {
             this.beginDragGuides(this.editingData);
           }
           // Vertex editing gets the same angle lock as drawing: the side
-          // arriving at the vertex is measured from the side before it.
+          // arriving at the vertex is measured from the side before it. The
+          // cursor guides step aside for it — both draw on the same layer,
+          // and while a corner is being squared up the lock is what matters.
           if (eventName === "gm:editstart" && this.editingData) {
             this.angleSnapping.beginVertexEdit(this.editingData);
+            if (this.anglesEnabled) this.alignmentGuides.setSuspended(true);
           }
         } catch {
           this.editingData = null;
@@ -5158,6 +5165,7 @@ export class GeoEditor implements IControl {
         const dragged = eventName === "gm:dragend";
         this.endDragGuides();
         this.angleSnapping.endVertexEdit();
+        this.alignmentGuides.setSuspended(false);
         const settled = this.holdAtLastValid(
           dragged ? this.alignOnRelease(eventFeature) : eventFeature,
         );

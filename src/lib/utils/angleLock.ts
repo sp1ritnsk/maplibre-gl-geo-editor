@@ -6,6 +6,10 @@
  * a room traced roughly square is squared up afterwards, by moving its
  * corners, and by hand a corner never lands exactly on the right angle.
  *
+ * A lock is a whole line, not a point: the vertex slides along it to wherever
+ * the cursor is, and the line itself is what gets drawn for the person to aim
+ * at — a lock nobody can see is a lock nobody can hit.
+ *
  * The rule is the drawing rule applied to both sides that meet at the dragged
  * vertex. The side arriving at the vertex is measured from the side before
  * it; the side leaving it is measured from the side after it. Each lock is a
@@ -30,6 +34,19 @@ export interface Corner {
   prev: Ground | null;
   next: Ground | null;
   nextNext: Ground | null;
+}
+
+/**
+ * A side locked onto a whole step: the line it lies on, and where on that
+ * line the vertex would land.
+ */
+export interface Lock {
+  /** Neighbour the locked side starts from. */
+  origin: Ground;
+  /** Direction of the locked side, in radians. */
+  direction: number;
+  /** Point on the line nearest the cursor — where the vertex lands. */
+  position: Ground;
 }
 
 /** Two directions closer than this in sine are treated as the same one. */
@@ -77,44 +94,57 @@ export function linesCross(
 }
 
 /**
- * Where the dragged vertex may land so that its sides sit on whole steps.
+ * The locked lines the dragged vertex may sit on: one per side that has a
+ * side of its own to be measured from.
  *
- * Returned as candidates rather than as one answer: which of them the vertex
- * actually takes is decided by whichever is nearest the cursor on screen, and
- * that is snapping's job, not geometry's.
+ * Which of them the vertex actually takes is decided by whichever is nearest
+ * the cursor on screen — that is snapping's job, not geometry's.
  *
  * @param corner - The vertex's neighbours; see {@link Corner}.
  * @param cursor - Where the hand is, on the ground.
  * @param stepDegrees - Angle step, e.g. 45.
  */
-export function lockedVertexPositions(
-  corner: Corner,
-  cursor: Ground,
-  stepDegrees: number,
-): Ground[] {
+export function lockedVertexSides(corner: Corner, cursor: Ground, stepDegrees: number): Lock[] {
   const step = (stepDegrees * Math.PI) / 180;
-  const rays: { origin: Ground; direction: number }[] = [];
+  const locks: Lock[] = [];
 
   const lock = (anchor: Ground | null, reference: Ground | null): void => {
     if (anchor === null || reference === null) return;
     // A side of no length sets no direction, and a cursor sitting exactly on
     // the anchor points nowhere: guessing either is worse than leaving them.
     if (apart(reference, anchor) === 0 || apart(anchor, cursor) === 0) return;
-    rays.push({
-      origin: anchor,
-      direction: lockedDirection(angleOf(reference, anchor), angleOf(anchor, cursor), step),
-    });
+    const direction = lockedDirection(
+      angleOf(reference, anchor),
+      angleOf(anchor, cursor),
+      step,
+    );
+    locks.push({ origin: anchor, direction, position: footOnRay(anchor, direction, cursor) });
   };
 
   lock(corner.prev, corner.prevPrev);
   lock(corner.next, corner.nextNext);
+  return locks;
+}
 
-  const positions = rays.map((ray) => footOnRay(ray.origin, ray.direction, cursor));
-  if (rays.length === 2) {
-    const crossing = linesCross(rays[0], rays[1]);
-    if (crossing !== null) positions.push(crossing);
-  }
-  return positions;
+/**
+ * Where two locked sides meet: the corner square — or on a step — on both
+ * sides at once. Nothing when they are too near parallel to meet anywhere
+ * meaningful.
+ */
+export function lockedCrossing(locks: Lock[]): Ground | null {
+  return locks.length === 2 ? linesCross(locks[0], locks[1]) : null;
+}
+
+/** Every position the vertex may land on: each locked side, plus their crossing. */
+export function lockedVertexPositions(
+  corner: Corner,
+  cursor: Ground,
+  stepDegrees: number,
+): Ground[] {
+  const locks = lockedVertexSides(corner, cursor, stepDegrees);
+  const crossing = lockedCrossing(locks);
+  const positions = locks.map((lock) => lock.position);
+  return crossing === null ? positions : [...positions, crossing];
 }
 
 /**

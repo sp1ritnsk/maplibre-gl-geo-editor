@@ -41,11 +41,26 @@ function room(): Feature {
   };
 }
 
+/** Пикселей на метр в поддельной карте: масштаб плана зала. */
+const SCALE = 10;
+
 function harness() {
   const handlers = new Map<string, (event: unknown) => void>();
+  const toScreen = (position: number[]) => {
+    const { east, north } = metres(position);
+    return { x: 400 + east * SCALE, y: 300 - north * SCALE };
+  };
   const map = {
     on: (name: string, handler: (event: unknown) => void) => handlers.set(name, handler),
     off: (name: string) => handlers.delete(name),
+    project: (position: number[]) => toScreen(position),
+    unproject: ([x, y]: number[]) => {
+      const east = (x - 400) / SCALE;
+      const north = (300 - y) / SCALE;
+      const [lng, lat] = at(east, north);
+      return { lng, lat };
+    },
+    getCanvas: () => ({ clientWidth: 800, clientHeight: 600 }),
   };
   const published: number[][][] = [];
   const cleared: string[] = [];
@@ -66,15 +81,18 @@ function harness() {
   const move = (position: number[]) =>
     handlers.get("mousemove")?.({
       lngLat: { lng: position[0], lat: position[1] },
-      point: { x: 0, y: 0 },
+      point: toScreen(position),
     });
   const click = (position: number[]) =>
     handlers.get("click")?.({
       lngLat: { lng: position[0], lat: position[1] },
-      point: { x: 0, y: 0 },
+      point: toScreen(position),
     });
 
-  return { snapping, move, click, published, cleared };
+  const drawn: number[][][] = [];
+  snapping.setGuideRenderer((lines) => drawn.push(lines));
+
+  return { snapping, move, click, published, cleared, drawn };
 }
 
 describe("угловой замок при правке вершины", () => {
@@ -154,5 +172,45 @@ describe("угловой замок при правке вершины", () => {
     expect(last).toHaveLength(1);
     expect(last[0].east).toBeCloseTo(10, 1);
     expect(last[0].north).toBeCloseTo(6, 1);
+  });
+});
+
+describe("линии замка", () => {
+  it("показывает линию, к которой притянет, когда рука подходит близко", () => {
+    const { snapping, move, drawn } = harness();
+    move(at(10, 10));
+    snapping.beginVertexEdit({ getGeoJson: () => room() });
+    // 0.4 м мимо прямого угла — по экрану 4 px при 10 px на метр.
+    move(at(10.4, 9.6));
+
+    const last = drawn[drawn.length - 1];
+    expect(last.length).toBeGreaterThan(0);
+    // Линия идёт по направлению стороны: перпендикуляр к южной стене — вертикаль.
+    const vertical = last.find((line) => {
+      const [from, to] = line.map(metres);
+      return Math.abs(from.east - to.east) < 0.01;
+    });
+    expect(vertical).toBeDefined();
+  });
+
+  it("не рисует линий, до которых рука ещё далеко", () => {
+    const { snapping, move, drawn } = harness();
+    move(at(10, 10));
+    snapping.beginVertexEdit({ getGeoJson: () => room() });
+    // 12 м мимо: замок такой длины не подсказка, а помеха.
+    move(at(22, 22));
+
+    expect(drawn[drawn.length - 1]).toEqual([]);
+  });
+
+  it("убирает линии, когда вершину отпустили", () => {
+    const { snapping, move, drawn } = harness();
+    move(at(10, 10));
+    snapping.beginVertexEdit({ getGeoJson: () => room() });
+    move(at(10.4, 9.6));
+
+    snapping.endVertexEdit();
+
+    expect(drawn[drawn.length - 1]).toEqual([]);
   });
 });

@@ -1,8 +1,8 @@
 import type { Feature, Position } from "geojson";
 import type { Map as MapLibreMap, MapMouseEvent } from "maplibre-gl";
 
-import { cornerAt, lockedVertexPositions } from "../utils/angleLock";
-import { frameAt, type Ground, toGround, toPosition } from "../utils/groundPlane";
+import { cornerAt, lockedCrossing, type Lock, lockedVertexSides } from "../utils/angleLock";
+import { type Frame, frameAt, type Ground, toGround, toPosition } from "../utils/groundPlane";
 
 /** Geoman's record of a shape, as far as this helper reaches into it. */
 interface EditedShape {
@@ -51,6 +51,20 @@ export interface AngleSnappingOptions {
   sectionKey?: string;
 }
 
+/** Draws the lines a lock offers, so the person can aim at them. */
+export type GuideRenderer = (lines: Position[][]) => void;
+
+/**
+ * How far from a lock, in multiples of the snapping tolerance, its line
+ * starts being drawn. It appears a little before the lock takes hold, so the
+ * line is something to aim at rather than a report of what already happened;
+ * further out the map would fill with lines that lead nowhere.
+ */
+const SHOW_WITHIN_TOLERANCES = 2;
+
+/** Fallback for geoman's own snapping tolerance, in pixels. */
+const DEFAULT_SNAP_PIXELS = 18;
+
 /**
  * Angle snapping for drawing.
  *
@@ -91,6 +105,7 @@ export class AngleSnapping {
   /** Which vertex of it — fixed for the length of the drag. */
   private editIndex: number | null = null;
   private lastCursor: Position | null = null;
+  private renderGuides: GuideRenderer | null = null;
 
   private handleClick: ((e: MapMouseEvent) => void) | null = null;
   private handleMouseMove: ((e: MapMouseEvent) => void) | null = null;
@@ -115,6 +130,17 @@ export class AngleSnapping {
     return this.enabled;
   }
 
+  /**
+   * Where to draw the lines this helper locks onto.
+   *
+   * The lock is a line on the ground; without seeing it a person can only
+   * guess where the perpendicular is and, missing it by more than the
+   * snapping tolerance, concludes that nothing snaps at all.
+   */
+  setGuideRenderer(render: GuideRenderer | null): void {
+    this.renderGuides = render;
+  }
+
   enable(): void {
     if (!this.map || this.enabled) return;
     this.enabled = true;
@@ -137,11 +163,15 @@ export class AngleSnapping {
     this.reset();
   }
 
-  /** Forget the shape being drawn. Call when a drawing mode starts or ends. */
+  /**
+   * Forget the shape being drawn and take the lock lines off the map. Call
+   * when a drawing mode starts or ends.
+   */
   reset(): void {
     this.vertices = [];
     this.lockedPosition = null;
     this.clearSnapping();
+    this.draw([]);
   }
 
   /**
@@ -168,10 +198,12 @@ export class AngleSnapping {
     this.editIndex = this.vertexUnderCursor(shape, this.lastCursor);
   }
 
+  /** Let go of the vertex: no lock, no lines. */
   endVertexEdit(): void {
     this.edited = null;
     this.editIndex = null;
     this.clearSnapping();
+    this.draw([]);
   }
 
   destroy(): void {
@@ -235,20 +267,73 @@ export class AngleSnapping {
       return;
     }
     const frame = frameAt(cursorPosition);
-    const positions = lockedVertexPositions(
+    const cursor = toGround(cursorPosition, frame);
+    const locks = lockedVertexSides(
       cornerAt(
         path.points.map((point) => toGround(point, frame)),
         this.editIndex,
         path.closed,
       ),
-      toGround(cursorPosition, frame),
+      cursor,
       this.step,
     );
-    if (positions.length === 0) {
+    if (locks.length === 0) {
       this.clearSnapping();
+      this.draw([]);
       return;
     }
-    this.publishSnapping(positions.map((position) => toPosition(position, frame)));
+    const crossing = lockedCrossing(locks);
+    const positions = locks.map((lock) => lock.position);
+    this.publishSnapping(
+      (crossing === null ? positions : [...positions, crossing]).map((position) =>
+        toPosition(position, frame),
+      ),
+    );
+    this.drawLocks(locks, event, frame);
+  }
+
+  /**
+   * Draws the locks the hand is close to.
+   *
+   * Only those: a line for every step at every corner would cover the plan
+   * and say nothing about where this vertex is actually going.
+   */
+  private drawLocks(locks: Lock[], event: MapMouseEvent, frame: Frame): void {
+    if (this.renderGuides === null || this.map === null) return;
+    const reach = this.snapPixels() * SHOW_WITHIN_TOLERANCES;
+    const near = locks.filter((lock) => this.screenGap(event, lock.position, frame) <= reach);
+    this.renderGuides(near.map((lock) => this.lineAlong(lock, frame)));
+  }
+
+  private draw(lines: Position[][]): void {
+    this.renderGuides?.(lines);
+  }
+
+  /** How far a point on the ground is from the cursor, in screen pixels. */
+  private screenGap(event: MapMouseEvent, point: Ground, frame: Frame): number {
+    const projected = this.map!.project(toPosition(point, frame) as [number, number]);
+    return Math.hypot(projected.x - event.point.x, projected.y - event.point.y);
+  }
+
+  /** Geoman's snapping tolerance in pixels, as it is actually configured. */
+  private snapPixels(): number {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const distance = (this.geoman as any)?.options?.settings?.snapDistance;
+    return typeof distance === "number" && distance > 0 ? distance : DEFAULT_SNAP_PIXELS;
+  }
+
+  /** The lock drawn as a line long enough to cross the window. */
+  private lineAlong(lock: Lock, frame: Frame): Position[] {
+    const canvas = this.map!.getCanvas();
+    const corner = this.map!.unproject([canvas.clientWidth, canvas.clientHeight]);
+    const far = toGround([corner.lng, corner.lat], frame);
+    const span = Math.max(Math.hypot(far.x, far.y) * 2, 50);
+    const dx = Math.cos(lock.direction) * span;
+    const dy = Math.sin(lock.direction) * span;
+    return [
+      toPosition({ x: lock.origin.x - dx, y: lock.origin.y - dy }, frame),
+      toPosition({ x: lock.origin.x + dx, y: lock.origin.y + dy }, frame),
+    ];
   }
 
   private previousSide(): [Position, Position] | null {
@@ -274,19 +359,22 @@ export class AngleSnapping {
     // Углы меряются на земле, а не на экране: под наклонённой камерой экран —
     // перспектива, и 45° в картинке не 45° на плане.
     const frame = frameAt(side[0]);
+    const anchor = toGround(side[1], frame);
     const locked = this.lockAngle(
       toGround(side[0], frame),
-      toGround(side[1], frame),
+      anchor,
       toGround([event.lngLat.lng, event.lngLat.lat], frame),
     );
     if (!locked) {
       this.lockedPosition = null;
       this.clearSnapping();
+      this.draw([]);
       return;
     }
 
-    this.lockedPosition = toPosition(locked, frame);
+    this.lockedPosition = toPosition(locked.position, frame);
     this.publishSnapping([this.lockedPosition]);
+    this.drawLocks([{ ...locked, origin: anchor }], event, frame);
   }
 
   /**
@@ -295,7 +383,7 @@ export class AngleSnapping {
    * changes. A degenerate previous side sets no direction, and guessing one is
    * worse than leaving the cursor alone.
    */
-  private lockAngle(from: Ground, anchor: Ground, cursor: Ground): Ground | null {
+  private lockAngle(from: Ground, anchor: Ground, cursor: Ground): Lock | null {
     const length = Math.hypot(cursor.x - anchor.x, cursor.y - anchor.y);
     const reference = Math.hypot(anchor.x - from.x, anchor.y - from.y);
     if (length === 0 || reference === 0) return null;
@@ -303,10 +391,14 @@ export class AngleSnapping {
     const step = (this.step * Math.PI) / 180;
     const base = Math.atan2(anchor.y - from.y, anchor.x - from.x);
     const relative = Math.atan2(cursor.y - anchor.y, cursor.x - anchor.x) - base;
-    const snapped = base + Math.round(relative / step) * step;
+    const direction = base + Math.round(relative / step) * step;
     return {
-      x: anchor.x + length * Math.cos(snapped),
-      y: anchor.y + length * Math.sin(snapped),
+      origin: anchor,
+      direction,
+      position: {
+        x: anchor.x + length * Math.cos(direction),
+        y: anchor.y + length * Math.sin(direction),
+      },
     };
   }
 

@@ -26,7 +26,7 @@ A powerful MapLibre GL plugin for creating and editing geometries. Extends the f
 ### Helpers
 - **Snapping** - Geoman's vertex and edge snapping
 - **Alignment guides** - While drawing, the cursor snaps to the continuation of any edge on the plan, to edge midpoints and to the crossing of two continuations; while dragging, the shape's own corners snap onto neighbouring edges and corners, so a shelf lands flush against the wall and in one row with its neighbour. Geometry the editor does not hold (a room outline drawn by the host) is handed in with `setReferenceGeometry()`
-- **Angle snapping** - Sides lock to 45° steps measured from the neighbouring side of the shape itself, not from the screen axes: while drawing, each new side is measured from the one before it; while editing, dragging a vertex measures both sides meeting there from the sides beyond them, so a shape traced roughly square can be squared up afterwards
+- **Angle snapping** - Sides lock to 45° steps measured from the neighbouring side of the shape itself, not from the screen axes: while drawing, each new side is measured from the one before it; while editing, dragging a vertex measures both sides meeting there from the sides beyond them, so a shape traced roughly square can be squared up afterwards. The line a lock offers is drawn as the cursor approaches it, so there is something to aim at — where two locks cross is the corner square on both sides
 - **Placement constraint** - `setPlacementConstraint({ enabled, boundary })` keeps shapes inside a boundary and off each other while they are dragged, rotated, scaled or moved as a group: the shape follows the hand and settles at the last legal spot when it is released
 
 ### Basic Edit Tools (via Geoman Free)
